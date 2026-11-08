@@ -127,21 +127,28 @@ def test_late_sender_skips_instead_of_bursting():
         try:
             await b.start(_remote(a))
             await a.start(_remote(b))
+            t0 = time.perf_counter()
             await asyncio.sleep(0.2)
+            s0 = time.perf_counter()
             time.sleep(0.5)  # stall the whole event loop
+            stall = time.perf_counter() - s0
             await asyncio.sleep(0.3)
             sent = a.packets_sent
+            elapsed = time.perf_counter() - t0
             await asyncio.sleep(0.05)
-            return sent, b.recording()
+            recorded = time.perf_counter() - t0
+            return sent, elapsed, stall, recorded, b.recording()
         finally:
             await _close(a, b)
 
-    sent, got = asyncio.run(main())
-    # 1 s of wall time is 50 slots. About 25 were skipped during the stall.
-    assert 15 <= sent <= 40
+    # Slow CI runners overshoot sleeps, so expectations use measured time.
+    sent, elapsed, stall, recorded, got = asyncio.run(main())
+    # A sender that bursts its backlog sends one packet per slot of wall time.
+    # Ours skips the stalled slots instead.
+    assert 10 <= sent <= 50 * (elapsed - stall) + 5
     # The skipped slots still advance the RTP timestamp, so the far end
     # records a gap of the right length.
-    assert 0.85 * 8000 <= len(got) <= 1.15 * 8000
+    assert abs(len(got) / 8000 - recorded) <= 0.1
 
 
 def test_reorder_and_malformed_over_udp():
