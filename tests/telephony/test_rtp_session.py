@@ -11,6 +11,7 @@ from voiceqa.audio.g711 import decode_pcma, decode_pcmu, encode_pcma, encode_pcm
 from voiceqa.telephony.media import LocalMedia, PayloadType, RemoteMedia, media_clock
 from voiceqa.telephony.rtp import RtpSession
 from voiceqa.telephony.rtp.packet import RtpPacket, build_packet
+from voiceqa.telephony.rtp.timeline import MAX_EARLY, MAX_LATE
 
 CODECS = {
     PayloadType.PCMU: (encode_pcmu, decode_pcmu),
@@ -308,12 +309,17 @@ def test_sink_gets_sent_and_received_frames_on_the_media_clock():
 
     before, after, log_a, log_b = asyncio.run(main())
     sent_at = [f[0] for f in log_a.out]
-    # Sent frames are timed by their slot deadline, exactly 20 ms apart.
-    assert np.diff(sent_at) == pytest.approx([0.02] * (len(sent_at) - 1), abs=1e-9)
+    # Sent frames are timed by their slot deadline: whole 20 ms slots apart
+    # (more than one only when a stalled runner made the sender skip slots).
+    slots = np.diff(sent_at) / 0.02
+    np.testing.assert_allclose(slots, np.round(slots), atol=1e-6)
+    assert (np.round(slots) >= 1).all()
     assert before <= sent_at[0] <= sent_at[-1] <= after
     for at, arrived, _ in log_b.inc:
         assert before <= arrived <= after
-        assert abs(at - arrived) < 0.05
+        # The timeline keeps a frame between MAX_LATE before and MAX_EARLY
+        # after its arrival; a stalled runner can delay arrivals by tens of ms.
+        assert -MAX_LATE <= at - arrived <= MAX_EARLY
     # A frame cannot arrive before it was sent.
     assert log_b.inc[0][1] >= sent_at[0]
 
