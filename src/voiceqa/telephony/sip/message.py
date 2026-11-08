@@ -1,5 +1,6 @@
 """SIP message parsing and building (RFC 3261 section 7). No I/O here."""
 
+import re
 import secrets
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
