@@ -92,6 +92,15 @@ class FakeUas(asyncio.DatagramProtocol):
     def requests(self, method):
         return [m for m in self.received if isinstance(m, Request) and m.method == method]
 
+    def transactions(self, method):
+        # Timer A and E resend byte-identical copies when a reply is slow, and
+        # a resent INVITE gets the same final response and so a second ACK.
+        # Tests about the call flow count each distinct request once.
+        out = {}
+        for r in self.requests(method):
+            out.setdefault(r.to_bytes(), r)
+        return list(out.values())
+
     def responses(self, method):
         return [m for m in self.received if isinstance(m, Response) and m.cseq[1] == method]
 
@@ -209,6 +218,14 @@ async def start_uas(**kw):
     return uas
 
 
+def one_transaction(reqs):
+    # Timer E may resend a request if the reply is slow (T1 is 20 ms here), so
+    # count transactions, not packets: every copy must be byte-identical.
+    assert reqs, "request was never sent"
+    assert len({r.to_bytes() for r in reqs}) == 1, "more than one transaction"
+    return reqs[0]
+
+
 def config(uas, **kw):
     args = dict(
         server_host="127.0.0.1",
@@ -246,7 +263,7 @@ def run(scenario, **uas_kw):
 def test_basic_call_and_hangup():
     async def scenario(uas):
         call = await place_call(config(uas), "sip:agent@pbx.test", LOCAL)
-        await until(lambda: uas.requests("ACK"))
+        await until(lambda: uas.transactions("ACK"))
         local_addr = call.local_addr
         await call.hangup()
         await call.hangup()
@@ -256,7 +273,7 @@ def test_basic_call_and_hangup():
     assert call.remote_media == RemoteMedia("127.0.0.1", 30000, PayloadType.PCMA)
     assert call.ended
 
-    (invite,) = uas.requests("INVITE")
+    invite = one_transaction(uas.transactions("INVITE"))
     assert invite.uri == "sip:agent@pbx.test"
     via = parse_via(invite.headers.get("Via"))
     assert via.branch.startswith("z9hG4bK")
@@ -269,13 +286,13 @@ def test_basic_call_and_hangup():
     assert b"m=audio 40000 RTP/AVP 0 8\r\n" in invite.body
     assert invite.headers.get("Content-Type") == "application/sdp"
 
-    (ack,) = uas.requests("ACK")
+    (ack,) = uas.transactions("ACK")
     assert ack.uri == f"sip:agent@127.0.0.1:{uas.port}"
     assert ack.cseq == (1, "ACK")
     assert parse_name_addr(ack.headers.get("To")).tag == "uastag"
     assert parse_via(ack.headers.get("Via")).branch != via.branch
 
-    (bye,) = uas.requests("BYE")
+    bye = one_transaction(uas.transactions("BYE"))
     assert bye.cseq == (2, "BYE")
     assert bye.headers.get("Call-ID") == invite.headers.get("Call-ID") == call.call_id
     assert parse_name_addr(bye.headers.get("To")).tag == "uastag"
@@ -285,7 +302,7 @@ def test_target_without_scheme_uses_server_host():
     async def scenario(uas):
         call = await place_call(config(uas), "agent", LOCAL)
         await call.hangup()
-        return uas.requests("INVITE")[0].uri
+        return uas.transactions("INVITE")[0].uri
 
     assert run(scenario) == "sip:agent@127.0.0.1"
 
@@ -294,7 +311,7 @@ def test_wildcard_bind_advertises_routable_address():
     async def scenario(uas):
         call = await place_call(config(uas, local_host="0.0.0.0"), "agent", LOCAL)
         await call.hangup()
-        return call.local_addr, parse_via(uas.requests("INVITE")[0].headers.get("Via"))
+        return call.local_addr, parse_via(uas.transactions("INVITE")[0].headers.get("Via"))
 
     local_addr, via = run(scenario)
     assert local_addr[0] == "127.0.0.1"
@@ -305,12 +322,12 @@ def test_wildcard_bind_advertises_routable_address():
 def test_digest_challenge_then_accept(code, header):
     async def scenario(uas):
         call = await place_call(config(uas), "agent", LOCAL)
-        await until(lambda: len(uas.requests("ACK")) == 2)
+        await until(lambda: len(uas.transactions("ACK")) == 2)
         await call.hangup()
         return uas
 
     uas = run(scenario, challenges=[("n1", False)], challenge_code=code)
-    first, second = uas.requests("INVITE")
+    first, second = uas.transactions("INVITE")
     assert first.cseq == (1, "INVITE")
     assert second.cseq == (2, "INVITE")
     assert header not in first.headers
@@ -320,12 +337,12 @@ def test_digest_challenge_then_accept(code, header):
     b1 = parse_via(first.headers.get("Via")).branch
     b2 = parse_via(second.headers.get("Via")).branch
     assert b1 != b2
-    fail_ack, ok_ack = uas.requests("ACK")
+    fail_ack, ok_ack = uas.transactions("ACK")
     assert parse_via(fail_ack.headers.get("Via")).branch == b1
     assert fail_ack.cseq == (1, "ACK")
     assert ok_ack.cseq == (2, "ACK")
     assert ok_ack.headers.get(header) == second.headers.get(header)
-    assert uas.requests("BYE")[0].cseq == (3, "BYE")
+    assert uas.transactions("BYE")[0].cseq == (3, "BYE")
 
 
 @pytest.mark.parametrize("challenges", [[("n1", False), ("n2", False)], [("n1", False)] * 2])
@@ -333,7 +350,7 @@ def test_rejected_credentials_fail(challenges):
     async def scenario(uas):
         with pytest.raises(SipStatusError) as info:
             await place_call(config(uas), "agent", LOCAL)
-        await until(lambda: len(uas.requests("ACK")) == 2)
+        await until(lambda: len(uas.transactions("ACK")) == 2)
         return uas, info.value
 
     uas, err = run(scenario, challenges=challenges)
@@ -357,8 +374,8 @@ def test_stale_nonce_is_retried():
         return uas
 
     uas = run(scenario, challenges=[("n1", False), ("n2", True)])
-    assert [r.cseq[0] for r in uas.requests("INVITE")] == [1, 2, 3]
-    assert uas.digest_ok(uas.requests("INVITE")[2], 401)
+    assert [r.cseq[0] for r in uas.transactions("INVITE")] == [1, 2, 3]
+    assert uas.digest_ok(uas.transactions("INVITE")[2], 401)
 
 
 def test_endless_stale_challenges_stop():
@@ -400,16 +417,16 @@ def test_busy_is_acked_and_raised():
     async def scenario(uas):
         with pytest.raises(SipStatusError) as info:
             await place_call(config(uas), "agent", LOCAL)
-        await until(lambda: uas.requests("ACK"))
+        await until(lambda: uas.transactions("ACK"))
         return uas, info.value
 
     uas, err = run(scenario, final=486, final_reason="Busy Here")
     assert (err.status, err.reason) == (486, "Busy Here")
     assert "486" in str(err)
-    (invite,) = uas.requests("INVITE")
-    (ack,) = uas.requests("ACK")
+    invite = one_transaction(uas.transactions("INVITE"))
+    (ack,) = uas.transactions("ACK")
     assert parse_via(ack.headers.get("Via")).branch == parse_via(invite.headers.get("Via")).branch
-    assert not uas.requests("BYE")
+    assert not uas.transactions("BYE")
 
 
 def test_remote_hangup():
@@ -426,7 +443,7 @@ def test_remote_hangup():
     call, uas = run(scenario)
     assert call.ended
     assert [r.status for r in uas.responses("BYE")] == [200, 200]
-    assert not uas.requests("BYE")
+    assert not uas.transactions("BYE")
 
 
 def test_retransmitted_200_is_acked_again():
@@ -447,8 +464,8 @@ def test_record_route_becomes_route_set():
         return uas
 
     uas = run(scenario, record_route=["<sip:p1.test;lr>", "<sip:p2.test;lr>"])
-    (ack,) = uas.requests("ACK")
-    (bye,) = uas.requests("BYE")
+    (ack,) = uas.transactions("ACK")
+    bye = one_transaction(uas.transactions("BYE"))
     assert ack.headers.get_all("Route") == ["<sip:p2.test;lr>", "<sip:p1.test;lr>"]
     assert bye.headers.get_all("Route") == ["<sip:p2.test;lr>", "<sip:p1.test;lr>"]
 
@@ -464,8 +481,19 @@ def test_bad_sdp_answer_acks_and_hangs_up(answer, match):
         return uas
 
     uas = run(scenario, answer=answer)
-    assert len(uas.requests("ACK")) == 1
-    assert len(uas.requests("BYE")) == 1
+    assert len(uas.transactions("ACK")) == 1
+    one_transaction(uas.transactions("BYE"))
+
+
+def test_bad_sdp_answer_hangs_up_once_when_bye_is_resent():
+    async def scenario(uas):
+        with pytest.raises(SdpError):
+            await place_call(config(uas), "agent", LOCAL)
+        return uas
+
+    byes = run(scenario, answer=sdp_answer(port=0), drop_byes=1).requests("BYE")
+    assert len(byes) == 2
+    one_transaction(byes)
 
 
 def test_lost_bye_is_retransmitted():
@@ -498,7 +526,7 @@ def test_challenged_bye_is_retried_with_credentials():
         return uas
 
     uas = run(scenario, challenge_bye=True)
-    first, second = uas.requests("BYE")
+    first, second = uas.transactions("BYE")
     assert second.cseq[0] == first.cseq[0] + 1
     assert uas.digest_ok(second, 407)
 
