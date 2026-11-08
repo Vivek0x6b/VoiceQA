@@ -11,3 +11,4 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - CI on Windows, macOS and Linux for Python 3.11 to 3.13.
 - Current status section in docs/ARCHITECTURE.md.
 - .gitattributes so text files always use LF line endings.
+- G.711 PCMU and PCMA encode and decode in pure NumPy, bit-exact with the old audioop module so it works on Python 3.13.
