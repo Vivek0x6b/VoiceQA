@@ -132,24 +132,30 @@ def test_silence_when_idle():
 def test_pacing_no_drift():
     async def main():
         a, b = await _pair()
-        loop = asyncio.get_running_loop()
         try:
             await b.start(_remote(a))
-            t0 = loop.time()
+            t0 = media_clock()
             await a.start(_remote(b))
+            ts0 = a._stream.timestamp
+
+            def slots() -> int:
+                # The RTP timestamp also counts slots skipped after a stall,
+                # which a slow CI runner can cause; drift is about slots.
+                return ((a._stream.timestamp - ts0) & 0xFFFFFFFF) // 160
+
             await asyncio.sleep(1.0)
-            first = (a.packets_sent, loop.time() - t0)
+            first = (slots(), media_clock() - t0)
             await asyncio.sleep(2.0)
-            second = (a.packets_sent, loop.time() - t0)
+            second = (slots(), media_clock() - t0)
             await asyncio.sleep(0.05)
-            return first, second, b.packets_received
+            return first, second, b.packets_received, a.packets_sent
         finally:
             await _close(a, b)
 
-    (n1, e1), (n2, e2), received = asyncio.run(main())
+    (n1, e1), (n2, e2), received, sent = asyncio.run(main())
     assert abs(n1 - 50 * e1) <= 2
     assert abs(n2 - 50 * e2) <= 2
-    assert received >= n2 - 2
+    assert received >= sent - 3
 
 
 def test_late_sender_skips_instead_of_bursting():
