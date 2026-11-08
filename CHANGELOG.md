@@ -23,3 +23,11 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Minimal SIP UAS (`SipServer`) that answers calls with 100, 180 and 200, resends the 200 until the ACK arrives, answers resent requests, and handles BYE in both directions, OPTIONS and CANCEL. Offers without a common codec get 488.
 - Local test agent and `voiceqa agent` command: answers calls on a local port and echoes the caller's audio or plays a WAV file (any rate, mono or stereo), optionally hanging up after a set time.
 - `RtpSession.listen()` to get each received frame as it arrives. Echo mode uses it with a bounded 1 s buffer, so its work and memory per frame do not grow with call length.
+- Call recording on a shared clock: `CallRecorder` writes caller.wav, agent.wav, a stereo mix.wav and events.json (INVITE sent, ringing, answered, first RTP in and out, BYE). Audio is streamed to disk as it arrives, gaps are filled with silence, and both tracks end at the same length.
+- `place_call(on_event=...)` reports call events. `RtpSession.record(sink)` hands every sent and received frame to a sink with its time.
+- `WavWriter` for writing a WAV as audio comes in, and `read_wav_blocks` for reading one in pieces.
+
+### Changed
+
+- `RtpSession` no longer keeps the received audio in memory, and `recording()` is gone. Received frames are placed by RTP timestamp on the local clock, and a short burst of late packets no longer shifts the rest of the call.
+- Media timing uses `time.perf_counter` instead of the event loop clock, which only ticks every 15.6 ms on Windows before Python 3.13.

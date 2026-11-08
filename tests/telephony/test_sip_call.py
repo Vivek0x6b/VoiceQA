@@ -345,6 +345,36 @@ def test_digest_challenge_then_accept(code, header):
     assert uas.transactions("BYE")[0].cseq == (3, "BYE")
 
 
+def test_events_count_each_invite_but_ringing_and_answer_once():
+    seen = []
+
+    async def scenario(uas):
+        on_event = lambda name, **detail: seen.append((name, detail))  # noqa: E731
+        call = await place_call(config(uas), "agent", LOCAL, on_event=on_event)
+        await asyncio.sleep(0.2)  # let the resent 200s arrive
+        await call.hangup()
+
+    run(scenario, provisional=(100, 183, 180), challenges=[("n1", False)], retransmit_ok=2)
+    assert seen == [
+        ("invite_sent", {}),
+        ("invite_sent", {}),
+        ("ringing", {"status": 183}),
+        ("answered", {}),
+        ("bye_sent", {}),
+    ]
+
+
+def test_failed_call_reports_no_answer():
+    seen = []
+
+    async def scenario(uas):
+        with pytest.raises(SipStatusError):
+            await place_call(config(uas), "agent", LOCAL, on_event=lambda n, **d: seen.append(n))
+
+    run(scenario, final=486, final_reason="Busy Here")
+    assert seen == ["invite_sent", "ringing"]
+
+
 @pytest.mark.parametrize("challenges", [[("n1", False), ("n2", False)], [("n1", False)] * 2])
 def test_rejected_credentials_fail(challenges):
     async def scenario(uas):

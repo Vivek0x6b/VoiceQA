@@ -13,6 +13,7 @@ SIP never touches RTP sockets and RTP never parses SDP. Audio crossing this
 boundary is int16 mono at 8 kHz, as produced by voiceqa.audio.
 """
 
+import time
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Protocol
@@ -22,6 +23,10 @@ import numpy as np
 SAMPLE_RATE = 8000
 PTIME_MS = 20
 FRAME_SAMPLES = SAMPLE_RATE * PTIME_MS // 1000
+
+# The one clock for media timing and call events. Not loop.time(): on
+# Windows before Python 3.13 that ticks in 15.6 ms steps.
+media_clock = time.perf_counter
 
 
 class PayloadType(IntEnum):
@@ -69,6 +74,19 @@ class RemoteMedia:
         _check_ptime(self.ptime_ms)
 
 
+class MediaSink(Protocol):
+    """Gets every frame a MediaSession sends or receives, decoded to int16.
+
+    Times are seconds on media_clock. `at` is where the frame belongs on that
+    clock, taken from its RTP timestamp; `arrived` is when a received packet
+    came in.
+    """
+
+    def sent(self, at: float, samples: np.ndarray) -> None: ...
+
+    def received(self, at: float, arrived: float, samples: np.ndarray) -> None: ...
+
+
 class MediaSession(Protocol):
     """What the RTP side provides. Kept small so it can be swapped for Rust later."""
 
@@ -89,8 +107,8 @@ class MediaSession(Protocol):
         """Wait until all queued audio has been sent."""
         ...
 
-    def recording(self) -> np.ndarray:
-        """All audio received so far, decoded to int16 8 kHz mono, gaps filled with silence."""
+    def record(self, sink: MediaSink) -> None:
+        """Pass every frame sent and received from now on to sink. The session keeps no audio."""
         ...
 
     async def close(self) -> None:

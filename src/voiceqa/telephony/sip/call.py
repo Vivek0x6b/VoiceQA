@@ -36,6 +36,15 @@ MAX_AUTH_RETRIES = 4
 _Transaction = InviteClientTransaction | NonInviteClientTransaction
 _WILDCARDS = {"", "0.0.0.0"}
 
+# Called with an event name and details: invite_sent (each new INVITE,
+# including the one answering an auth challenge), ringing (first 18x, with
+# status), answered (first 2xx), bye_sent, bye_received.
+OnEvent = Callable[..., None]
+
+
+def _ignore(name: str, **detail: object) -> None:
+    pass
+
 
 @dataclass(frozen=True)
 class SipConfig:
@@ -69,9 +78,18 @@ async def _resolve(host: str, port: int) -> Address:
 
 
 class SipCall:
-    def __init__(self, config: SipConfig, server: Address, transport_host: str) -> None:
+    def __init__(
+        self,
+        config: SipConfig,
+        server: Address,
+        transport_host: str,
+        on_event: OnEvent = _ignore,
+    ) -> None:
         self.call_id = new_call_id()
         self._config = config
+        self._on_event = on_event
+        self._rang = False
+        self._answered = False
         self._server = server
         self._host = transport_host
         self._transport: UdpTransport | None = None
@@ -142,6 +160,7 @@ class SipCall:
         t1 = self._config.timer_t1
         tx: _Transaction
         if req.method == "INVITE":
+            self._on_event("invite_sent")
             tx = InviteClientTransaction(req, self._send, t1, self._resend_ack)
         else:
             tx = NonInviteClientTransaction(req, self._send, t1, self._config.timer_t2)
@@ -232,6 +251,7 @@ class SipCall:
                 bye.headers.add(name, value)
             return bye
 
+        self._on_event("bye_sent")
         try:
             await self._with_auth(make)
         finally:
@@ -250,9 +270,19 @@ class SipCall:
             key = (parse_via(vias[0]).branch or "", msg.cseq[1])
             tx = self._transactions.get(key)
             if tx is not None:
+                if msg.cseq[1] == "INVITE":
+                    self._report_invite_response(msg.status)
                 tx.receive(msg)
             return
         self._on_request(msg, addr)
+
+    def _report_invite_response(self, status: int) -> None:
+        if 180 <= status < 200 and not self._rang and not self._answered:
+            self._rang = True
+            self._on_event("ringing", status=status)
+        elif 200 <= status < 300 and not self._answered:
+            self._answered = True
+            self._on_event("answered")
 
     def _on_request(self, req: Request, addr: Address) -> None:
         assert self._transport is not None
@@ -260,6 +290,8 @@ class SipCall:
             return
         if req.method == "BYE":
             if self._dialog is not None and self._dialog.matches(req):
+                if not self.ended:
+                    self._on_event("bye_received")
                 self._ended.set()
                 resp = build_response(req, 200, "OK")
             else:
@@ -273,17 +305,23 @@ class SipCall:
         self._transport.send(resp, addr)
 
 
-async def place_call(config: SipConfig, target_uri: str, local_media: LocalMedia) -> SipCall:
+async def place_call(
+    config: SipConfig,
+    target_uri: str,
+    local_media: LocalMedia,
+    on_event: OnEvent | None = None,
+) -> SipCall:
     """Call target_uri and return once it is answered and ACKed.
 
     target_uri may be a full SIP URI or just a user part, which is sent to
-    the configured server. Raises SipStatusError on a final failure,
-    SipTimeoutError if the server never answers, and SdpError if the answer
-    has no usable audio stream (the call is hung up first).
+    the configured server. on_event is told about call events as they happen
+    (see OnEvent), for example CallRecorder.event. Raises SipStatusError on a
+    final failure, SipTimeoutError if the server never answers, and SdpError
+    if the answer has no usable audio stream (the call is hung up first).
     """
     server = await _resolve(config.server_host, config.server_port)
     host = routing_ip(server) if config.local_host in _WILDCARDS else config.local_host
-    call = SipCall(config, server, host)
+    call = SipCall(config, server, host, on_event or _ignore)
     await call._open()
     try:
         await call._establish(_target_uri(target_uri, config.server_host), local_media)

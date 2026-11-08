@@ -1,4 +1,7 @@
-"""Asyncio RTP session: one UDP socket, a paced sender task and a recorder.
+"""Asyncio RTP session: one UDP socket and a paced sender task.
+
+Every frame sent and received can be handed to a MediaSink with its time on
+media_clock. The session itself keeps no audio.
 
 Pacing: packet n is due at t0 + n * 20 ms, so timer jitter (about 15 ms on
 Windows) never accumulates into drift. If the loop wakes up to 100 ms late,
@@ -16,9 +19,17 @@ from collections.abc import Callable
 import numpy as np
 
 from voiceqa.audio.g711 import decode_pcma, decode_pcmu, encode_pcma, encode_pcmu
-from voiceqa.telephony.media import FRAME_SAMPLES, PTIME_MS, LocalMedia, PayloadType, RemoteMedia
+from voiceqa.telephony.media import (
+    FRAME_SAMPLES,
+    PTIME_MS,
+    LocalMedia,
+    MediaSink,
+    PayloadType,
+    RemoteMedia,
+    media_clock,
+)
 from voiceqa.telephony.rtp.packet import RtpStream, parse_packet
-from voiceqa.telephony.rtp.recorder import Recorder
+from voiceqa.telephony.rtp.timeline import ReceiveTimeline
 
 FRAME_SECONDS = PTIME_MS / 1000
 MAX_LATE_FRAMES = 5
@@ -48,7 +59,8 @@ class RtpSession:
         self._local: LocalMedia | None = None
         self._remote: RemoteMedia | None = None
         self._stream: RtpStream | None = None
-        self._recorder: Recorder | None = None
+        self._timeline: ReceiveTimeline | None = None
+        self._sink: MediaSink | None = None
         self._sender: asyncio.Task | None = None
         self._queue: deque[np.ndarray] = deque()
         self._drained = asyncio.Event()
@@ -98,6 +110,9 @@ class RtpSession:
         """Call back with each newly received frame, decoded, in arrival order."""
         self._listener = callback
 
+    def record(self, sink: MediaSink) -> None:
+        self._sink = sink
+
     async def start(self, remote: RemoteMedia) -> None:
         if self._closed:
             raise RuntimeError("RTP session is closed")
@@ -108,8 +123,9 @@ class RtpSession:
         self._encode = encode
         self._decode = decode
         self._silence = encode(np.zeros(FRAME_SAMPLES, dtype=np.int16))
+        self._decoded_silence = decode(self._silence)
         self._stream = RtpStream(int(remote.payload_type))
-        self._recorder = Recorder(decode)
+        self._timeline = ReceiveTimeline()
         self._sender = asyncio.create_task(self._send_loop())
 
     def send(self, samples: np.ndarray) -> None:
@@ -134,11 +150,6 @@ class RtpSession:
             raise RuntimeError("drain() before start() would wait forever")
         await self._drained.wait()
 
-    def recording(self) -> np.ndarray:
-        if self._recorder is None:
-            return np.zeros(0, dtype=np.int16)
-        return self._recorder.audio()
-
     async def close(self) -> None:
         if self._closed:
             return
@@ -151,24 +162,31 @@ class RtpSession:
         self._drained.set()
 
     async def _send_loop(self) -> None:
-        loop = asyncio.get_running_loop()
-        t0 = loop.time()
+        t0 = media_clock()
         slot = 0
         while True:
-            delay = t0 + slot * FRAME_SECONDS - loop.time()
+            delay = t0 + slot * FRAME_SECONDS - media_clock()
             if delay > 0:
                 await asyncio.sleep(delay)
-            behind = int((loop.time() - t0) / FRAME_SECONDS) - slot
+            behind = int((media_clock() - t0) / FRAME_SECONDS) - slot
             if behind > MAX_LATE_FRAMES:
                 self._stream.skip(behind * FRAME_SAMPLES)
                 slot += behind
-            self._send_frame()
+            self._send_frame(t0 + slot * FRAME_SECONDS)
             slot += 1
 
-    def _send_frame(self) -> None:
-        payload = self._encode(self._queue.popleft()) if self._queue else self._silence
+    def _send_frame(self, due: float) -> None:
+        if self._queue:
+            payload = self._encode(self._queue.popleft())
+            decoded = self._decode(payload) if self._sink is not None else None
+        else:
+            payload, decoded = self._silence, self._decoded_silence
         self._transport.sendto(self._stream.next_packet(payload), self._addr)
         self._packets_sent += 1
+        if self._sink is not None:
+            # What went on the wire, timed by its slot rather than by when the
+            # loop got round to sending it.
+            self._sink.sent(due, decoded)
         if not self._queue:
             self._drained.set()
 
@@ -177,15 +195,23 @@ class RtpSession:
         return (self._remote.host, self._remote.port)
 
     def _on_datagram(self, data: bytes) -> None:
-        if self._recorder is None or self._closed:
+        if self._timeline is None or self._closed:
             return
+        arrived = media_clock()
         try:
             packet = parse_packet(data)
         except ValueError:
             return
         if packet.payload_type != self._remote.payload_type:
             return
-        if self._recorder.add(packet):
-            self._packets_received += 1
-            if self._listener is not None:
-                self._listener(self._decode(packet.payload))
+        at = self._timeline.place(packet, arrived)
+        if at is None:
+            return
+        self._packets_received += 1
+        if self._listener is None and self._sink is None:
+            return
+        samples = self._decode(packet.payload)
+        if self._listener is not None:
+            self._listener(samples)
+        if self._sink is not None:
+            self._sink.received(at, arrived, samples)

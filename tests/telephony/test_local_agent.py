@@ -1,4 +1,7 @@
 import asyncio
+import json
+import os
+import tempfile
 import time
 import tracemalloc
 
@@ -6,9 +9,10 @@ import numpy as np
 import pytest
 
 from voiceqa.audio.dsp import generate_tone
-from voiceqa.audio.wav import write_wav
+from voiceqa.audio.wav import read_wav, write_wav
 from voiceqa.telephony.local.agent import AgentConfig, EchoBuffer, LocalAgent, load_prompt
 from voiceqa.telephony.media import FRAME_SAMPLES, SAMPLE_RATE
+from voiceqa.telephony.recording import CallRecorder
 from voiceqa.telephony.rtp import RtpSession
 from voiceqa.telephony.sip import SipConfig, place_call
 
@@ -42,19 +46,33 @@ def dominant_hz(audio):
     return np.fft.rfftfreq(len(loud), 1 / SAMPLE_RATE)[spectrum.argmax()]
 
 
+async def record_call(agent, directory, send=None, listen=1.5, media_delay=0.0):
+    """Call the agent, optionally send audio, and record both sides to directory."""
+    rec = CallRecorder(directory)
+    try:
+        rtp = await RtpSession.open(bind_host="127.0.0.1")
+        rtp.record(rec)
+        try:
+            call = await place_call(caller_config(agent), "agent", rtp.local, on_event=rec.event)
+            try:
+                await asyncio.sleep(media_delay)
+                await rtp.start(call.remote_media)
+                if send is not None:
+                    rtp.send(send)
+                await asyncio.sleep(listen)
+            finally:
+                await call.hangup()
+        finally:
+            await rtp.close()
+    finally:
+        rec.close()
+
+
 async def call_and_record(agent, send=None, listen=1.5):
     """Call the agent, optionally send audio, and return what came back."""
-    rtp = await RtpSession.open(bind_host="127.0.0.1")
-    call = await place_call(caller_config(agent), "agent", rtp.local)
-    try:
-        await rtp.start(call.remote_media)
-        if send is not None:
-            rtp.send(send)
-        await asyncio.sleep(listen)
-        return rtp.recording()
-    finally:
-        await call.hangup()
-        await rtp.close()
+    with tempfile.TemporaryDirectory() as tmp:
+        await record_call(agent, tmp, send=send, listen=listen)
+        return read_wav(os.path.join(tmp, "agent.wav"))[0]
 
 
 def test_echo_sends_the_callers_audio_back():
@@ -71,6 +89,50 @@ def test_echo_sends_the_callers_audio_back():
     # One second of tone is 50 frames; allow a frame or two at each edge.
     assert 46 <= loud_frames(got) <= 52
     assert abs(dominant_hz(got) - 440) < 5
+
+
+def first_loud_sample(audio, threshold=2000):
+    return int(np.flatnonzero(np.abs(audio) > threshold)[0])
+
+
+def test_recording_of_an_echo_call_lines_up_on_one_clock(tmp_path):
+    tone = generate_tone(440, 0.5)
+
+    async def main():
+        agent = await LocalAgent.start(agent_config())
+        try:
+            # Media starts well after time zero, so a recorder that did not
+            # pad the start of a track would put the tone in the wrong place.
+            await record_call(agent, tmp_path, send=tone, listen=1.2, media_delay=0.3)
+        finally:
+            await agent.close()
+
+    asyncio.run(main())
+    caller, _ = read_wav(tmp_path / "caller.wav")
+    agent, _ = read_wav(tmp_path / "agent.wav")
+    mix, _ = read_wav(tmp_path / "mix.wav")
+    data = json.loads((tmp_path / "events.json").read_text())
+
+    assert len(caller) == len(agent) == len(mix)
+    np.testing.assert_array_equal(mix[:, 0], caller)
+    np.testing.assert_array_equal(mix[:, 1], agent)
+    assert abs(len(caller) / SAMPLE_RATE - data["duration"]) < 1e-3
+
+    t = {e["event"]: e["t"] for e in data["events"]}
+    assert len(t) == len(data["events"]) == 6
+    assert 0 <= t["invite_sent"] <= t["ringing"] <= t["answered"]
+    assert t["answered"] <= min(t["first_rtp_out"], t["first_rtp_in"])
+    assert max(t["first_rtp_out"], t["first_rtp_in"]) < t["bye_sent"] <= data["duration"]
+
+    # The tone starts where the first sent frame is placed, and the echo
+    # comes back a little later on the same clock.
+    said = first_loud_sample(caller) / SAMPLE_RATE
+    heard = first_loud_sample(agent) / SAMPLE_RATE
+    assert t["first_rtp_out"] >= t["answered"] + 0.25
+    assert abs(said - t["first_rtp_out"]) < 0.025
+    assert 0 < heard - said < 0.2
+    assert 23 <= loud_frames(caller) <= 26
+    assert 23 <= loud_frames(agent) <= 27
 
 
 def test_play_sends_the_wav_resampled_to_8k(tmp_path):

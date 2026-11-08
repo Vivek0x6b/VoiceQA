@@ -35,8 +35,8 @@ class FakeMedia:
     async def drain(self):
         pass
 
-    def recording(self):
-        return None
+    def record(self, sink):
+        pass
 
     async def close(self):
         self.closed = True
@@ -186,6 +186,48 @@ def test_answers_a_call_with_an_sdp_answer_for_the_offered_codec():
         await call.hangup()
 
     run(scenario)
+
+
+class Events:
+    def __init__(self):
+        self.seen = []
+
+    def __call__(self, name, **detail):
+        self.seen.append((name, detail))
+
+    @property
+    def names(self):
+        return [name for name, _ in self.seen]
+
+
+def test_caller_reports_call_events():
+    async def scenario(server, agent):
+        events = Events()
+        call = await place_call(caller_config(server), "agent", CALLER_MEDIA, on_event=events)
+        await until(lambda: agent.calls)
+        await call.hangup()
+        return events.seen
+
+    seen = run(scenario)
+    assert [name for name, _ in seen] == ["invite_sent", "ringing", "answered", "bye_sent"]
+    assert seen[1][1] == {"status": 180}
+
+
+def test_caller_reports_bye_from_the_far_end():
+    async def hang_up(call):
+        await asyncio.sleep(0.05)
+        await call.hangup()
+
+    async def scenario(server, agent):
+        events = Events()
+        call = await place_call(caller_config(server), "agent", CALLER_MEDIA, on_event=events)
+        async with asyncio.timeout(3):
+            await call.wait_ended()
+        await call.hangup()
+        return events.names
+
+    names = run(scenario, behaviour=hang_up)
+    assert names == ["invite_sent", "ringing", "answered", "bye_received"]
 
 
 def test_sends_trying_and_ringing_before_ok():
