@@ -5,9 +5,20 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 ## Current status
 
 - Current milestone: M1 (local SIP call with two-way audio and recording), in progress.
-- Finished issues: issue 1, G.711 codec (PCMU/PCMA) and WAV I/O. The project scaffold, CLI (`version`, `doctor`) and CI were done before that.
-- Next issue: issue 2 (RTP sender and receiver with 20 ms pacing) and issue 3 (SIP UAC with INVITE, ACK, BYE, digest auth and SDP offer/answer), worked on in parallel.
-- Known problems: none.
+- Finished issues: issue 1 (G.711 codec and WAV I/O), issue 2 (RTP sender and receiver with 20 ms pacing), issue 3 (SIP UAC with INVITE, ACK, BYE, digest auth and SDP offer/answer). The project scaffold, CLI (`version`, `doctor`) and CI were done before that.
+- M1 issues:
+  1. G.711 codec (PCMU/PCMA) and WAV I/O. Done.
+  2. RTP sender and receiver with 20 ms pacing. Done.
+  3. SIP UAC: INVITE, ACK, BYE, digest auth, SDP offer/answer. Done.
+  4. Not named yet.
+  5. Not named yet.
+  6. Not named yet.
+- Next issue: issue 4.
+- Known problems:
+  - An in-dialog re-INVITE (for example a session timer refresh) is answered with 488, which some providers treat as a reason to drop the call.
+  - SIP is UDP and IPv4 only, MD5 digest only, no REGISTER or CANCEL, no NAT rewrite of Contact from `received`/`rport`.
+  - RTP has no RTCP, no DTMF and no symmetric RTP source check. `recording()` places audio by RTP timestamp only, so latency work in M4 will also need arrival times.
+  - On Windows the Proactor loop does not call `connection_lost` when a UDP transport closes with a send in flight. The SIP transport works around it with `abort()` after two yields.
 
 ## Decisions
 
@@ -21,6 +32,8 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 - G.711 is our own NumPy code because audioop was removed in Python 3.13. It is bit-exact with the Sun reference g711.c that audioop used, and the tests compare against audioop on Python versions that still have it.
 - Audio inside VoiceQA is int16. Mono is a 1-D array, multichannel is (frames, channels). Audio functions are pure (arrays in, arrays out) so they can move to Rust later.
 - Resampling uses our own polyphase windowed-sinc filter instead of adding scipy as a dependency.
+- RTP pacing uses absolute deadlines (packet n is due at t0 + n * 20 ms). Up to 5 late frames are sent back to back. When the loop is blocked for longer, missed slots are skipped and the RTP timestamp jumps forward, so the far end hears a gap of the right length instead of a burst.
+- SIP sends every request to the configured server, used as an outbound proxy. A 2xx with unusable SDP is ACKed and then ended with BYE before the error is raised.
 
 ## Media interface
 
@@ -42,8 +55,8 @@ src/voiceqa/
     wav.py          16-bit PCM WAV read and write
     dsp.py          downmix, resampling, test tones
   telephony/media.py  SIP to RTP contract (LocalMedia, RemoteMedia, MediaSession)
-  telephony/rtp/    RTP sender and receiver
-  telephony/sip/    SIP UAC and SDP
+  telephony/rtp/    RTP packet codec, recorder, paced session
+  telephony/sip/    SIP messages, SDP, digest auth, transactions, call flow
   telephony/local/  local loopback transport for tests and offline runs
   engine/           scenario runner and reporting
   cli/              Typer commands
