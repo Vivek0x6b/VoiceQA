@@ -19,3 +19,4 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - RTP packet build and parse (RFC 3550, handles padding, CSRC and header extensions).
 - `RtpSession`: G.711 RTP over UDP paced at 50 packets/s on absolute deadlines, with a recording placed by RTP timestamp so reordered, duplicate and missing packets are handled.
 - Minimal SIP UAC over UDP: INVITE with retransmission, MD5 digest auth for 401 and 407, ACK, BYE in both directions, and SDP offer/answer for PCMU and PCMA.
+- SIP and RTP socket tests run on both asyncio event loops (selector and, on Windows, proactor).

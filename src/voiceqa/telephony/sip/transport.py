@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from typing import cast
 
 from voiceqa.telephony.sip.errors import SipParseError
 from voiceqa.telephony.sip.message import Request, Response, parse_message
@@ -33,8 +34,9 @@ class UdpTransport(asyncio.DatagramProtocol):
         return self._local
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        assert isinstance(transport, asyncio.DatagramTransport)
-        self._transport = transport
+        # No isinstance check: on 3.11 the selector UDP transport does not
+        # subclass DatagramTransport (fixed in 3.12).
+        self._transport = cast(asyncio.DatagramTransport, transport)
         self._lost = asyncio.get_running_loop().create_future()
         sockname = transport.get_extra_info("sockname")
         self._local = (sockname[0], sockname[1])
