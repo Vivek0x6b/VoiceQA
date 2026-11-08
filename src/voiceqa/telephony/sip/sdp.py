@@ -7,9 +7,9 @@ from voiceqa.telephony.media import LocalMedia, PayloadType, RemoteMedia
 from voiceqa.telephony.sip.errors import SdpError
 
 
-def build_offer(local: LocalMedia, session_id: int | None = None) -> str:
+def _build(local: LocalMedia, payload_types: Sequence[PayloadType], session_id: int | None) -> str:
     sid = session_id if session_id is not None else secrets.randbelow(2**31)
-    pts = " ".join(str(int(pt)) for pt in local.payload_types)
+    pts = " ".join(str(int(pt)) for pt in payload_types)
     lines = [
         "v=0",
         f"o=voiceqa {sid} {sid} IN IP4 {local.host}",
@@ -18,9 +18,21 @@ def build_offer(local: LocalMedia, session_id: int | None = None) -> str:
         "t=0 0",
         f"m=audio {local.port} RTP/AVP {pts}",
     ]
-    lines += [f"a=rtpmap:{int(pt)} {pt.name}/8000" for pt in local.payload_types]
+    lines += [f"a=rtpmap:{int(pt)} {pt.name}/8000" for pt in payload_types]
     lines += [f"a=ptime:{local.ptime_ms}", "a=sendrecv"]
     return "\r\n".join(lines) + "\r\n"
+
+
+def build_offer(local: LocalMedia, session_id: int | None = None) -> str:
+    return _build(local, local.payload_types, session_id)
+
+
+def build_answer(
+    local: LocalMedia, payload_type: PayloadType, session_id: int | None = None
+) -> str:
+    if payload_type not in local.payload_types:
+        raise ValueError(f"{payload_type.name} is not one of our payload types")
+    return _build(local, (payload_type,), session_id)
 
 
 def _connection_host(value: str) -> str:
@@ -33,6 +45,15 @@ def _connection_host(value: str) -> str:
 
 
 def parse_answer(sdp: str | bytes, offered: Sequence[PayloadType]) -> RemoteMedia:
+    return _parse(sdp, offered, "answer")
+
+
+def parse_offer(sdp: str | bytes, supported: Sequence[PayloadType]) -> RemoteMedia:
+    """The far end's media and the first codec in its offer that we support."""
+    return _parse(sdp, supported, "offer")
+
+
+def _parse(sdp: str | bytes, accepted: Sequence[PayloadType], role: str) -> RemoteMedia:
     if isinstance(sdp, bytes):
         sdp = sdp.decode("utf-8", errors="replace")
 
@@ -60,20 +81,20 @@ def parse_answer(sdp: str | bytes, offered: Sequence[PayloadType]) -> RemoteMedi
                 media_host = _connection_host(value)
 
     if media is None:
-        raise SdpError("answer has no audio stream")
+        raise SdpError(f"{role} has no audio stream")
     if len(media) < 4 or not media[1].split("/")[0].isdigit():
         raise SdpError(f"bad m= line: m={' '.join(media)}")
     port = int(media[1].split("/")[0])
     if port == 0:
-        raise SdpError("remote rejected the audio stream (port 0)")
+        raise SdpError(f"{role} rejected the audio stream (port 0)")
     if media[2] != "RTP/AVP":
         raise SdpError(f"only RTP/AVP is supported, got {media[2]}")
     host = media_host or session_host
     if host is None:
-        raise SdpError("answer has no connection (c=) line")
+        raise SdpError(f"{role} has no connection (c=) line")
 
-    wanted = {int(pt) for pt in offered}
+    wanted = {int(pt) for pt in accepted}
     for fmt in media[3:]:
         if fmt.isdigit() and int(fmt) in wanted:
             return RemoteMedia(host=host, port=port, payload_type=PayloadType(int(fmt)))
-    raise SdpError(f"no common codec, answer offered {' '.join(media[3:])}")
+    raise SdpError(f"no common codec, {role} has {' '.join(media[3:])}")

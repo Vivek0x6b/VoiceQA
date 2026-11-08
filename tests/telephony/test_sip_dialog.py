@@ -141,3 +141,46 @@ def test_matches_in_dialog_request():
     h.set("Call-ID", "cid1")
     h.set("To", "<sip:1001@pbx.example>;tag=wrong")
     assert not d.matches(Request("BYE", "sip:1001@10.0.0.1", h))
+
+
+def uas_dialog(*, record_route=()):
+    invite = make_invite()
+    for rr in record_route:
+        invite.headers.add("Record-Route", rr)
+    return invite, Dialog.from_invite(invite, local_tag="atag")
+
+
+def test_uas_dialog_swaps_from_and_to():
+    invite, d = uas_dialog()
+    assert d.call_id == "cid1"
+    assert d.local_tag == "atag"
+    assert d.remote_tag == "ftag"
+    assert d.local_from == "<sip:agent@pbx.example>;tag=atag"
+    assert d.remote_to == invite.headers.get("From")
+    assert d.remote_target == "sip:1001@10.0.0.1:5062"
+
+
+def test_uas_dialog_keeps_record_route_order():
+    _, d = uas_dialog(record_route=("<sip:p1;lr>", "<sip:p2;lr>"))
+    assert d.route_set == ("<sip:p1;lr>", "<sip:p2;lr>")
+
+
+def test_uas_bye_targets_caller_contact_with_our_tag_in_from():
+    _, d = uas_dialog()
+    bye = d.make_request("BYE", via_value("10.0.0.2", 5060, "z9hG4bKbye"))
+    assert bye.uri == "sip:1001@10.0.0.1:5062"
+    assert parse_name_addr(bye.headers.get("From")).tag == "atag"
+    assert parse_name_addr(bye.headers.get("To")).tag == "ftag"
+    assert bye.cseq == (1, "BYE")
+
+
+def test_uas_dialog_matches_caller_requests():
+    invite, d = uas_dialog()
+    h = Headers()
+    h.add("From", invite.headers.get("From"))
+    h.add("To", d.local_from)
+    h.add("Call-ID", "cid1")
+    h.add("CSeq", "2 BYE")
+    assert d.matches(Request("BYE", "sip:agent@10.0.0.2", h))
+    h.set("To", "<sip:agent@pbx.example>;tag=other")
+    assert not d.matches(Request("BYE", "sip:agent@10.0.0.2", h))

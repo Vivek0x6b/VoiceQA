@@ -78,6 +78,23 @@ class Dialog:
             local_seq=invite.cseq[0],
         )
 
+    @classmethod
+    def from_invite(cls, invite: Request, local_tag: str) -> "Dialog":
+        """The UAS side, created when we answer an INVITE."""
+        remote_from = invite.headers.get("From") or ""
+        contacts = invite.headers.get_all("Contact")
+        target = parse_name_addr(contacts[0] if contacts else remote_from).uri
+        return cls(
+            call_id=invite.headers.get("Call-ID") or "",
+            local_tag=local_tag,
+            remote_tag=parse_name_addr(remote_from).tag or "",
+            local_from=f"{invite.headers.get('To') or ''};tag={local_tag}",
+            remote_to=remote_from,
+            remote_target=target,
+            route_set=tuple(invite.headers.get_all("Record-Route")),
+            local_seq=0,
+        )
+
     def make_request(self, method: str, via: str, cseq: int | None = None) -> Request:
         if cseq is None:
             self.local_seq += 1

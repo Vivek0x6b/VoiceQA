@@ -2,7 +2,7 @@ import pytest
 
 from voiceqa.telephony.media import LocalMedia, PayloadType, RemoteMedia
 from voiceqa.telephony.sip.errors import SdpError
-from voiceqa.telephony.sip.sdp import build_offer, parse_answer
+from voiceqa.telephony.sip.sdp import build_answer, build_offer, parse_answer, parse_offer
 
 BOTH = (PayloadType.PCMU, PayloadType.PCMA)
 
@@ -113,3 +113,48 @@ def test_uses_first_audio_stream_after_video():
         "m=video 5000 RTP/AVP 96\r\nc=IN IP4 192.0.2.99\r\nm=audio 18000 RTP/AVP 8 0 101",
     )
     assert parse_answer(sdp, BOTH).host == "203.0.113.5"
+
+
+def test_answer_text_has_only_the_chosen_codec():
+    local = LocalMedia(host="127.0.0.1", port=30000)
+    assert build_answer(local, PayloadType.PCMA, session_id=7) == (
+        "v=0\r\n"
+        "o=voiceqa 7 7 IN IP4 127.0.0.1\r\n"
+        "s=voiceqa\r\n"
+        "c=IN IP4 127.0.0.1\r\n"
+        "t=0 0\r\n"
+        "m=audio 30000 RTP/AVP 8\r\n"
+        "a=rtpmap:8 PCMA/8000\r\n"
+        "a=ptime:20\r\n"
+        "a=sendrecv\r\n"
+    )
+
+
+def test_answer_needs_a_codec_we_have():
+    local = LocalMedia(host="127.0.0.1", port=30000, payload_types=(PayloadType.PCMU,))
+    with pytest.raises(ValueError):
+        build_answer(local, PayloadType.PCMA)
+
+
+def test_offer_parse_picks_first_codec_in_offer_order():
+    remote = parse_offer(BASIC, BOTH)
+    assert remote == RemoteMedia(host="203.0.113.5", port=18000, payload_type=PayloadType.PCMA)
+
+
+def test_offer_parse_round_trips_our_own_offer():
+    local = LocalMedia(host="10.0.0.1", port=4000)
+    remote = parse_offer(build_offer(local), (PayloadType.PCMA, PayloadType.PCMU))
+    assert remote == RemoteMedia(host="10.0.0.1", port=4000, payload_type=PayloadType.PCMU)
+
+
+@pytest.mark.parametrize(
+    "sdp, match",
+    [
+        ("", "offer has no audio"),
+        (BASIC.replace("RTP/AVP 8 0 101", "RTP/AVP 18 101"), "codec"),
+        (BASIC.replace("m=audio 18000", "m=audio 0"), "port 0"),
+    ],
+)
+def test_bad_offers(sdp, match):
+    with pytest.raises(SdpError, match=match):
+        parse_offer(sdp, BOTH)
