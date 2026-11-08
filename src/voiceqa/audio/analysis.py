@@ -86,7 +86,7 @@ def _find_onsets(samples: np.ndarray, threshold: float, quiet_samples: int) -> l
     starts = np.flatnonzero(edges == 1)
     ends = np.flatnonzero(edges == -1)
     onsets = []
-    prev_end = 0
+    prev_end = -quiet_samples  # the start of the array counts as quiet
     for start, end in zip(starts, ends, strict=True):
         if start - prev_end >= quiet_samples:
             onsets.append(int(start))

@@ -203,6 +203,8 @@ def call(
 
 
 def _print_calibration_summary(result: CalibrationResult) -> None:
+    if not result.answered:
+        _line("call", f"no ({result.reason})" if result.reason else "no")
     _line("median", f"{result.median_ms:.1f} ms" if result.median_ms is not None else "none")
     _line("p95", f"{result.p95_ms:.1f} ms" if result.p95_ms is not None else "none")
     _line("matched", f"{result.pulses_matched}/{result.pulses_sent}")

@@ -3,7 +3,7 @@ import json
 
 import numpy as np
 
-from voiceqa.engine.calibrate import generate_pulse_train, run_calibration
+from voiceqa.engine.calibrate import generate_pulse_train, pulse_count, run_calibration
 
 
 def test_generate_pulse_train_has_a_burst_at_the_start_of_each_period():
@@ -16,10 +16,14 @@ def test_generate_pulse_train_has_a_burst_at_the_start_of_each_period():
 
 
 def test_run_calibration_against_the_local_echo_agent_writes_calibration_json(tmp_path):
-    result = asyncio.run(run_calibration(tmp_path, seconds=2.0))
+    seconds = 2.0
+    result = asyncio.run(run_calibration(tmp_path, seconds=seconds))
 
-    # Generous bounds: a local loopback round trip should be nowhere near 1 s.
-    assert result.pulses_sent >= 2
+    # pulses_sent comes from how the train was built, not from detecting
+    # onsets, so it must match exactly, not just be "enough".
+    assert result.pulses_sent == pulse_count(seconds)
+    assert result.answered is True
+    # Generous bound: a local loopback round trip should be nowhere near 1 s.
     assert result.pulses_matched >= 1
     assert result.median_ms is not None
     assert 0 <= result.median_ms < 1000

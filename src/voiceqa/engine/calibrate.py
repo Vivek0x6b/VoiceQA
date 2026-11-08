@@ -32,6 +32,12 @@ BURST_HZ = 1000.0
 TAIL_SECONDS = 1.0
 
 
+def _pulse_starts(seconds: float, period_ms: float, sample_rate: int) -> range:
+    total = round(seconds * sample_rate)
+    period = max(round(period_ms / 1000 * sample_rate), 1)
+    return range(0, total, period)
+
+
 def generate_pulse_train(
     seconds: float,
     burst_ms: float = BURST_MS,
@@ -42,13 +48,25 @@ def generate_pulse_train(
 ) -> np.ndarray:
     """A burst_ms burst of freq_hz every period_ms, starting at 0, for seconds total."""
     total = round(seconds * sample_rate)
-    period = max(round(period_ms / 1000 * sample_rate), 1)
     burst = generate_tone(freq_hz, burst_ms / 1000, sample_rate, amplitude)
     out = np.zeros(total, dtype=np.int16)
-    for start in range(0, total, period):
+    for start in _pulse_starts(seconds, period_ms, sample_rate):
         end = min(start + len(burst), total)
         out[start:end] = burst[: end - start]
     return out
+
+
+def pulse_count(
+    seconds: float, period_ms: float = PERIOD_MS, sample_rate: int = SAMPLE_RATE
+) -> int:
+    """How many pulses generate_pulse_train(seconds, period_ms, ...) produces.
+
+    This is the authoritative "pulses sent" count: it comes straight from
+    how the train was built, not from detecting onsets in the recording
+    afterward, which can miss a pulse that starts too close to the edge of
+    the file to have a full quiet gap in front of it.
+    """
+    return len(_pulse_starts(seconds, period_ms, sample_rate))
 
 
 @dataclass(frozen=True)
@@ -61,6 +79,8 @@ class CalibrationResult:
     max_ms: float | None
     pulses_sent: int
     pulses_matched: int
+    answered: bool
+    reason: str | None
     record_dir: Path
 
 
@@ -76,7 +96,7 @@ async def run_calibration(record_dir: str | Path, seconds: float = 10.0) -> Cali
     record_dir = Path(record_dir)
     agent = await LocalAgent.start(AgentConfig(host="127.0.0.1", port=0))
     try:
-        await run_call(
+        call_result = await run_call(
             target="calibrate",
             server_host="127.0.0.1",
             server_port=agent.local_addr[1],
@@ -108,8 +128,13 @@ async def run_calibration(record_dir: str | Path, seconds: float = 10.0) -> Cali
         p95_ms=p95_ms,
         min_ms=min_ms,
         max_ms=max_ms,
-        pulses_sent=timing.pulses_sent,
+        # The onsets pulse_round_trip_delays finds in caller.wav are only
+        # used to pair up echoes; how many pulses we actually built is
+        # already known, and is not at the mercy of onset detection.
+        pulses_sent=pulse_count(seconds),
         pulses_matched=timing.pulses_matched,
+        answered=call_result.answered,
+        reason=call_result.reason,
         record_dir=record_dir,
     )
     _write_calibration_json(result)

@@ -1,11 +1,13 @@
 import platform
 import re
 import shutil
+from pathlib import Path
 
 from typer.testing import CliRunner
 
 import voiceqa
 from voiceqa.cli.main import app
+from voiceqa.engine.calibrate import CalibrationResult
 
 runner = CliRunner()
 
@@ -88,3 +90,50 @@ def test_calibrate_help_lists_its_options():
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     for option in ("--seconds", "--record-dir"):
         assert option in plain
+
+
+def _fake_calibration(pulses_sent, pulses_matched, answered=True, reason="OK"):
+    async def run(record_dir, seconds=10.0):
+        return CalibrationResult(
+            created_at="2026-01-01T00:00:00.000Z",
+            samples=pulses_matched,
+            median_ms=20.0 if pulses_matched else None,
+            p95_ms=20.0 if pulses_matched else None,
+            min_ms=20.0 if pulses_matched else None,
+            max_ms=20.0 if pulses_matched else None,
+            pulses_sent=pulses_sent,
+            pulses_matched=pulses_matched,
+            answered=answered,
+            reason=reason,
+            record_dir=Path(record_dir),
+        )
+
+    return run
+
+
+def test_calibrate_exits_1_when_fewer_than_half_the_pulses_matched(monkeypatch):
+    import voiceqa.cli.main as main
+
+    monkeypatch.setattr(main, "run_calibration", _fake_calibration(pulses_sent=4, pulses_matched=1))
+    result = runner.invoke(app, ["calibrate"])
+    assert result.exit_code == 1
+
+
+def test_calibrate_exits_0_when_half_or_more_pulses_matched(monkeypatch):
+    import voiceqa.cli.main as main
+
+    monkeypatch.setattr(main, "run_calibration", _fake_calibration(pulses_sent=4, pulses_matched=2))
+    result = runner.invoke(app, ["calibrate"])
+    assert result.exit_code == 0
+
+
+def test_calibrate_prints_the_reason_when_the_call_was_not_answered(monkeypatch):
+    import voiceqa.cli.main as main
+
+    fake = _fake_calibration(
+        pulses_sent=0, pulses_matched=0, answered=False, reason="486 Busy Here"
+    )
+    monkeypatch.setattr(main, "run_calibration", fake)
+    result = runner.invoke(app, ["calibrate"])
+    assert result.exit_code == 1
+    assert "486 Busy Here" in result.output

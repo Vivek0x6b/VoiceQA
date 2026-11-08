@@ -92,3 +92,29 @@ def test_pulse_round_trip_delays_ignores_a_spurious_click():
     assert timing.pulses_sent == 2
     assert timing.pulses_matched == 2
     assert timing.delays_ms == pytest.approx([10.0, 10.0], abs=0.2)
+
+
+def test_pulse_round_trip_delays_counts_a_pulse_right_at_the_start():
+    # There is no quiet before sample 0 to measure, but a pulse starting
+    # there is still a real pulse and must still be counted.
+    caller = pulses(6000, [0, 4000])
+    agent = pulses(6000, [80, 4080])
+
+    timing = pulse_round_trip_delays(caller, agent)
+
+    assert timing.pulses_sent == 2
+    assert timing.pulses_matched == 2
+    assert timing.delays_ms == pytest.approx([10.0, 10.0], abs=0.2)
+
+
+def test_pulse_round_trip_delays_counts_a_pulse_shortly_after_the_start():
+    # Only 100 samples of quiet precede this pulse, well under quiet_ms's
+    # 800 samples, but the start of the array still counts as quiet.
+    caller = pulses(6000, [100, 4000])
+    agent = pulses(6000, [180, 4080])
+
+    timing = pulse_round_trip_delays(caller, agent)
+
+    assert timing.pulses_sent == 2
+    assert timing.pulses_matched == 2
+    assert timing.delays_ms == pytest.approx([10.0, 10.0], abs=0.2)
