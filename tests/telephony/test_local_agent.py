@@ -1,11 +1,13 @@
 import asyncio
+import time
+import tracemalloc
 
 import numpy as np
 import pytest
 
 from voiceqa.audio.dsp import generate_tone
 from voiceqa.audio.wav import write_wav
-from voiceqa.telephony.local.agent import AgentConfig, LocalAgent, load_prompt
+from voiceqa.telephony.local.agent import AgentConfig, EchoBuffer, LocalAgent, load_prompt
 from voiceqa.telephony.media import FRAME_SAMPLES, SAMPLE_RATE
 from voiceqa.telephony.rtp import RtpSession
 from voiceqa.telephony.sip import SipConfig, place_call
@@ -124,3 +126,65 @@ def test_load_prompt_downmixes_and_resamples(tmp_path):
 def test_missing_prompt_fails_before_listening(tmp_path):
     with pytest.raises(FileNotFoundError):
         asyncio.run(LocalAgent.start(agent_config(play=tmp_path / "nope.wav")))
+
+
+TEN_MINUTES = 10 * 60 * 1000 // 20
+
+
+def frames(n):
+    rng = np.random.default_rng(1)
+    pool = [rng.integers(-8000, 8000, FRAME_SAMPLES, dtype=np.int16) for _ in range(64)]
+    for i in range(n):
+        yield pool[i % len(pool)]
+
+
+def test_echo_buffer_work_per_frame_stays_flat_over_ten_minutes():
+    buf = EchoBuffer()
+    sent = []
+    block = TEN_MINUTES // 10
+    timings = []
+    t = time.perf_counter()
+    for i, frame in enumerate(frames(TEN_MINUTES), 1):
+        buf.push(frame)
+        buf.flush(sent.append)
+        sent.clear()
+        if i % block == 0:
+            now = time.perf_counter()
+            timings.append(now - t)
+            t = now
+    first, last = min(timings[:3]), min(timings[-3:])
+    assert last < 3 * first + 0.01, timings
+
+
+def test_echo_buffer_memory_stays_bounded_over_ten_minutes():
+    buf = EchoBuffer()
+    count = 0
+
+    def sink(frame):
+        nonlocal count
+        count += 1
+
+    tracemalloc.start()
+    try:
+        for i, frame in enumerate(frames(TEN_MINUTES), 1):
+            buf.push(frame.copy())
+            buf.flush(sink)
+            if i == TEN_MINUTES // 10:
+                early, _ = tracemalloc.get_traced_memory()
+        late, _ = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert count == TEN_MINUTES
+    assert late - early < 64 * 1024
+
+
+def test_echo_buffer_drops_the_oldest_frames_when_not_flushed():
+    buf = EchoBuffer(max_frames=50)
+    for frame in frames(TEN_MINUTES):
+        buf.push(frame)
+    assert len(buf) == 50
+    out = []
+    buf.flush(out.append)
+    assert len(out) == 50 and len(buf) == 0
+    last_50 = list(frames(TEN_MINUTES))[-50:]
+    assert all(np.array_equal(a, b) for a, b in zip(out, last_50, strict=True))

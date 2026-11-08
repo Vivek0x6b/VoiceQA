@@ -201,6 +201,47 @@ def test_reorder_and_malformed_over_udp():
     np.testing.assert_array_equal(got, expected)
 
 
+def test_listener_gets_each_new_frame_in_arrival_order():
+    def pkt(ts: int, value: int, pt: int = 0) -> bytes:
+        payload = encode_pcmu(np.full(160, value, dtype=np.int16))
+        return build_packet(
+            RtpPacket(payload_type=pt, sequence=0, timestamp=ts, ssrc=5, payload=payload)
+        )
+
+    async def main():
+        raw = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        raw.bind(("127.0.0.1", 0))
+        b = await RtpSession.open(bind_host="127.0.0.1")
+        heard = []
+        b.listen(heard.append)
+        try:
+            await b.start(RemoteMedia(host="127.0.0.1", port=raw.getsockname()[1], payload_type=0))
+            dest = ("127.0.0.1", b.local.port)
+            for data in [
+                b"garbage",
+                pkt(320, 3000),
+                pkt(0, 7000, pt=8),
+                pkt(0, 1000),
+                pkt(320, -9000),
+            ]:
+                raw.sendto(data, dest)
+            loop = asyncio.get_running_loop()
+            stop = loop.time() + 2.0
+            while b.packets_received < 2 and loop.time() < stop:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            return heard
+        finally:
+            await b.close()
+            raw.close()
+
+    heard = asyncio.run(main())
+    assert [int(f[0]) for f in heard] == [
+        int(decode_pcmu(encode_pcmu(np.array([v], np.int16)))[0]) for v in (3000, 1000)
+    ]
+    assert all(f.dtype == np.int16 and f.shape == (160,) for f in heard)
+
+
 def test_send_validation():
     async def main():
         s = await RtpSession.open(bind_host="127.0.0.1")

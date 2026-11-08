@@ -6,7 +6,10 @@ real voice agent or a SIP provider.
 
 import asyncio
 import os
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 
@@ -35,16 +38,30 @@ def load_prompt(path: str | os.PathLike) -> np.ndarray:
     return resample(to_mono(samples), rate, SAMPLE_RATE)
 
 
-async def echo(call: ServerCall) -> None:
-    sent = 0
+ECHO_BUFFER_FRAMES = 50  # 1 s
+
+
+class EchoBuffer:
+    """Received frames waiting to be sent back. When full, the oldest are dropped."""
+
+    def __init__(self, max_frames: int = ECHO_BUFFER_FRAMES) -> None:
+        self._frames: deque[np.ndarray] = deque(maxlen=max_frames)
+
+    def __len__(self) -> int:
+        return len(self._frames)
+
+    def push(self, frame: np.ndarray) -> None:
+        self._frames.append(frame)
+
+    def flush(self, send: Callable[[np.ndarray], None]) -> None:
+        while self._frames:
+            send(self._frames.popleft())
+
+
+async def echo(call: ServerCall, buffer: EchoBuffer) -> None:
     while True:
         await asyncio.sleep(PTIME_MS / 1000)
-        # recording() rebuilds the whole call each time. Fine for test calls
-        # of a few minutes.
-        heard = call.media.recording()
-        if len(heard) > sent:
-            call.media.send(heard[sent:])
-            sent = len(heard)
+        buffer.flush(call.media.send)
 
 
 async def play(call: ServerCall, prompt: np.ndarray) -> None:
@@ -91,7 +108,10 @@ class LocalAgent:
         if self._prompt is not None:
             work = asyncio.ensure_future(play(call, self._prompt))
         else:
-            work = asyncio.ensure_future(echo(call))
+            buffer = EchoBuffer()
+            # call.media is the RtpSession that _open_media made.
+            cast(RtpSession, call.media).listen(buffer.push)
+            work = asyncio.ensure_future(echo(call, buffer))
         try:
             if self.config.hangup_after is None:
                 await work

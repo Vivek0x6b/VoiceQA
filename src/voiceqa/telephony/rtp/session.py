@@ -55,6 +55,7 @@ class RtpSession:
         self._closed = False
         self._packets_sent = 0
         self._packets_received = 0
+        self._listener: Callable[[np.ndarray], None] | None = None
 
     @classmethod
     async def open(
@@ -93,6 +94,10 @@ class RtpSession:
     def packets_received(self) -> int:
         return self._packets_received
 
+    def listen(self, callback: Callable[[np.ndarray], None]) -> None:
+        """Call back with each newly received frame, decoded, in arrival order."""
+        self._listener = callback
+
     async def start(self, remote: RemoteMedia) -> None:
         if self._closed:
             raise RuntimeError("RTP session is closed")
@@ -101,6 +106,7 @@ class RtpSession:
         encode, decode = _CODECS[PayloadType(remote.payload_type)]
         self._remote = remote
         self._encode = encode
+        self._decode = decode
         self._silence = encode(np.zeros(FRAME_SAMPLES, dtype=np.int16))
         self._stream = RtpStream(int(remote.payload_type))
         self._recorder = Recorder(decode)
@@ -181,3 +187,5 @@ class RtpSession:
             return
         if self._recorder.add(packet):
             self._packets_received += 1
+            if self._listener is not None:
+                self._listener(self._decode(packet.payload))
