@@ -19,7 +19,7 @@ from voiceqa.audio.analysis import first_loud_frame
 from voiceqa.telephony.media import SAMPLE_RATE, PayloadType, media_clock
 from voiceqa.telephony.recording import CallRecorder
 from voiceqa.telephony.rtp import RtpSession
-from voiceqa.telephony.sip import SipConfig, SipStatusError, SipTimeoutError, place_call
+from voiceqa.telephony.sip import SipConfig, SipError, SipStatusError, place_call
 from voiceqa.telephony.sip.transport import routing_ip
 
 
@@ -76,6 +76,12 @@ async def run_call(
     passes either a loaded WAV or a default tone. Hangs up duration seconds
     after the answer, or sooner if the far end hangs up first. Always closes
     the recorder, even if this is cancelled (Ctrl+C) partway through.
+
+    A call that cannot be set up (the server host does not resolve, the far
+    end answers with no usable codec, or any other SIP failure) comes back
+    as a CallResult with answered=False and a short reason, not an
+    exception: there is no good way to place this call, but that is not a
+    bug, and the recording still needs to be closed and reported.
     """
     record_dir = Path(record_dir)
     rec = CallRecorder(record_dir)
@@ -86,42 +92,46 @@ async def run_call(
     frames_sent = 0
     frames_received = 0
     try:
-        resolved = await _resolve(server_host, server_port)
-        advertise_host = routing_ip(resolved)
-        rtp = await RtpSession.open(
-            bind_host="0.0.0.0", advertise_host=advertise_host, payload_types=(codec,)
-        )
         try:
-            rtp.record(rec)
-            sip_config = SipConfig(
-                server_host=server_host,
-                server_port=server_port,
-                username=username,
-                password=password,
+            resolved = await _resolve(server_host, server_port)
+        except OSError as exc:
+            reason = f"cannot resolve {server_host}: {exc}"
+        else:
+            advertise_host = routing_ip(resolved)
+            rtp = await RtpSession.open(
+                bind_host="0.0.0.0", advertise_host=advertise_host, payload_types=(codec,)
             )
             try:
-                call = await place_call(sip_config, target, rtp.local, on_event=rec.event)
-            except SipStatusError as exc:
-                status, reason = exc.status, exc.reason
-            except SipTimeoutError as exc:
-                reason = str(exc)
-            else:
-                answered = True
-                status, reason = 200, "OK"
-                t_answered = media_clock()
+                rtp.record(rec)
+                sip_config = SipConfig(
+                    server_host=server_host,
+                    server_port=server_port,
+                    username=username,
+                    password=password,
+                )
                 try:
-                    await rtp.start(call.remote_media)
-                    rtp.send(audio)
-                    with contextlib.suppress(TimeoutError):
-                        async with asyncio.timeout(duration):
-                            await call.wait_ended()
-                finally:
-                    await call.hangup()
-                call_duration = media_clock() - t_answered
-            frames_sent = rtp.packets_sent
-            frames_received = rtp.packets_received
-        finally:
-            await rtp.close()
+                    call = await place_call(sip_config, target, rtp.local, on_event=rec.event)
+                except SipStatusError as exc:
+                    status, reason = exc.status, exc.reason
+                except SipError as exc:
+                    reason = str(exc)
+                else:
+                    answered = True
+                    status, reason = 200, "OK"
+                    t_answered = media_clock()
+                    try:
+                        await rtp.start(call.remote_media)
+                        rtp.send(audio)
+                        with contextlib.suppress(TimeoutError):
+                            async with asyncio.timeout(duration):
+                                await call.wait_ended()
+                    finally:
+                        await call.hangup()
+                    call_duration = media_clock() - t_answered
+                frames_sent = rtp.packets_sent
+                frames_received = rtp.packets_received
+            finally:
+                await rtp.close()
     finally:
         rec.close()
 

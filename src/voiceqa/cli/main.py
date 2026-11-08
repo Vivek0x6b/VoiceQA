@@ -13,6 +13,7 @@ import typer
 
 from voiceqa import __version__
 from voiceqa.audio.dsp import generate_tone
+from voiceqa.engine.calibrate import CalibrationResult, run_calibration
 from voiceqa.engine.call import CallResult, run_call
 from voiceqa.telephony.local.agent import AgentConfig, LocalAgent, load_prompt
 from voiceqa.telephony.media import PayloadType
@@ -86,7 +87,12 @@ async def _serve_agent(config: AgentConfig) -> None:
 
 def _split_host_port(value: str, default_port: int) -> tuple[str, int]:
     host, sep, port = value.rpartition(":")
-    return (host, int(port)) if sep else (value, default_port)
+    if not sep:
+        return value, default_port
+    try:
+        return host, int(port)
+    except ValueError:
+        raise ValueError(f"bad --server value {value!r}: port {port!r} is not a number") from None
 
 
 def _target_host_port(target: str) -> tuple[str, int] | None:
@@ -98,23 +104,24 @@ def _target_host_port(target: str) -> tuple[str, int] | None:
     return host, int(port) if port else DEFAULT_SIP_PORT
 
 
-def _print_summary(result: CallResult) -> None:
-    def line(label: str, value: str) -> None:
-        typer.echo(f"{label:<14}{value}")
+def _line(label: str, value: str) -> None:
+    typer.echo(f"{label:<14}{value}")
 
+
+def _print_summary(result: CallResult) -> None:
     if result.answered:
-        line("answered", "yes")
-        line("duration", f"{result.duration:.2f} s")
-        line("frames sent", str(result.frames_sent))
-        line("frames recv", str(result.frames_received))
+        _line("answered", "yes")
+        _line("duration", f"{result.duration:.2f} s")
+        _line("frames sent", str(result.frames_sent))
+        _line("frames recv", str(result.frames_received))
         if result.first_audio_latency is None:
-            line("first audio", "none")
+            _line("first audio", "none")
         else:
-            line("first audio", f"{result.first_audio_latency:.3f} s after answer")
+            _line("first audio", f"{result.first_audio_latency:.3f} s after answer")
     else:
         detail = f"{result.status} {result.reason}" if result.status else result.reason
-        line("answered", f"no ({detail})")
-    line("recording", str(result.record_dir))
+        _line("answered", f"no ({detail})")
+    _line("recording", str(result.record_dir))
 
 
 @app.command()
@@ -147,7 +154,11 @@ def call(
     option, so it never ends up in shell history.
     """
     if server is not None:
-        server_host, server_port = _split_host_port(server, DEFAULT_SIP_PORT)
+        try:
+            server_host, server_port = _split_host_port(server, DEFAULT_SIP_PORT)
+        except ValueError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(2) from None
     else:
         parsed = _target_host_port(target)
         if parsed is None:
@@ -184,7 +195,47 @@ def call(
         )
     except KeyboardInterrupt:
         typer.echo("call interrupted", err=True)
+        _line("recording", str(directory))
         raise typer.Exit(1) from None
 
     _print_summary(result)
     raise typer.Exit(0 if result.answered else 1)
+
+
+def _print_calibration_summary(result: CalibrationResult) -> None:
+    _line("median", f"{result.median_ms:.1f} ms" if result.median_ms is not None else "none")
+    _line("p95", f"{result.p95_ms:.1f} ms" if result.p95_ms is not None else "none")
+    _line("matched", f"{result.pulses_matched}/{result.pulses_sent}")
+    _line("recording", str(result.record_dir))
+
+
+@app.command()
+def calibrate(
+    seconds: Annotated[float, typer.Option(help="How long to send test pulses for.")] = 10.0,
+    record_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--record-dir",
+            help="Where to write the recording. Default: runs/<time>-calibrate.",
+        ),
+    ] = None,
+) -> None:
+    """Measure VoiceQA's own round-trip latency against a local echo agent.
+
+    Starts a local echo agent in-process, sends it a train of short tone
+    pulses instead of a real conversation, and times how long each pulse
+    takes to come back. This is VoiceQA's own floor, not how fast a real
+    voice agent thinks: subtract it from latencies measured against one.
+    """
+    directory = record_dir or Path("runs") / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-calibrate"
+
+    try:
+        result = asyncio.run(run_calibration(directory, seconds=seconds))
+    except KeyboardInterrupt:
+        typer.echo("calibration interrupted", err=True)
+        _line("recording", str(directory))
+        raise typer.Exit(1) from None
+
+    _print_calibration_summary(result)
+    enough_matched = result.pulses_sent > 0 and result.pulses_matched * 2 >= result.pulses_sent
+    raise typer.Exit(0 if enough_matched else 1)

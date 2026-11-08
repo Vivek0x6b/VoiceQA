@@ -61,3 +61,30 @@ def test_call_without_server_or_host_fails_with_bad_options():
     result = runner.invoke(app, ["call", "agent"])
     assert result.exit_code == 2
     assert "--server" in result.output
+
+
+def test_call_with_a_non_numeric_server_port_fails_with_bad_options():
+    result = runner.invoke(app, ["call", "agent", "--server", "127.0.0.1:abc"])
+    assert result.exit_code == 2
+    assert "abc" in result.output
+
+
+def test_call_interrupted_prints_the_recording_folder(tmp_path, monkeypatch):
+    import voiceqa.cli.main as main
+
+    def interrupted(**kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main, "run_call", interrupted)
+    result = runner.invoke(app, ["call", "sip:agent@127.0.0.1:5070", "--record-dir", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "call interrupted" in result.output
+    assert str(tmp_path) in result.output
+
+
+def test_calibrate_help_lists_its_options():
+    result = runner.invoke(app, ["calibrate", "--help"])
+    assert result.exit_code == 0
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    for option in ("--seconds", "--record-dir"):
+        assert option in plain

@@ -29,8 +29,11 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `WavWriter` for writing a WAV as audio comes in, and `read_wav_blocks` for reading one in pieces.
 - `voiceqa call` command: places one SIP call, sends a WAV file or a default test tone once answered, records both sides, and prints a plain text summary (answered, duration, frames sent and received, first-audio latency, recording folder). Exit code reflects whether the call was answered.
 - `first_loud_frame` in `voiceqa.audio.analysis`: finds the first 20 ms frame above a given RMS threshold in a WAV file, reading it in blocks. Used to compute first-audio latency for `voiceqa call`.
+- `voiceqa calibrate` command: calls a local echo agent with a train of short tone pulses instead of a real conversation, measures each pulse's round-trip delay, and writes `calibration.json` (median, p95, min, max, pulses sent and matched) into the recording folder. This is VoiceQA's own round-trip floor, meant to be subtracted from latencies measured against a real voice agent. Exits 1 if fewer than half the pulses came back.
+- `pulse_round_trip_delays` in `voiceqa.audio.analysis`: finds pulse onsets in a caller and an agent recording and pairs them up into round-trip delays, used by `voiceqa calibrate`.
 
 ### Changed
 
 - `RtpSession` no longer keeps the received audio in memory, and `recording()` is gone. Received frames are placed by RTP timestamp on the local clock, and a short burst of late packets no longer shifts the rest of the call.
 - Media timing uses `time.perf_counter` instead of the event loop clock, which only ticks every 15.6 ms on Windows before Python 3.13.
+- `voiceqa call` no longer crashes with a traceback when the SIP server host cannot be resolved or the far end answers with no usable codec; both are now reported as an unanswered call with a short reason, same as a rejected call. A non-numeric port in `--server` (for example `host:abc`) is now a plain bad-options error (exit 2) instead of an unhandled exception. Ctrl+C during a call now also prints the recording folder, not just "call interrupted".
