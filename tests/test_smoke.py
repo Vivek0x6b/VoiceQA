@@ -1,4 +1,5 @@
 import platform
+import re
 import shutil
 
 from typer.testing import CliRunner
@@ -42,5 +43,7 @@ def test_agent_refuses_a_missing_wav_before_listening(tmp_path):
 def test_agent_help_lists_its_options():
     result = runner.invoke(app, ["agent", "--help"])
     assert result.exit_code == 0
+    # Rich styles the help when it thinks colour is wanted (on CI, for one).
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     for option in ("--host", "--port", "--play", "--hangup-after"):
-        assert option in result.output
+        assert option in plain
