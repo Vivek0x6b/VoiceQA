@@ -2,6 +2,13 @@
 
 VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to an agent, speaks with local TTS, transcribes with local STT (faster-whisper), and writes JSON and HTML reports. No audio, transcript or report leaves the user's machine.
 
+## Current status
+
+- Current milestone: M1 (local SIP call with two-way audio and recording), not started.
+- Finished issues: none yet. The project scaffold, CLI (`version`, `doctor`) and CI are in place.
+- Next issue: issue 1, G.711 codec (PCMU/PCMA) and WAV I/O.
+- Known problems: none.
+
 ## Decisions
 
 - Python 3.11+, src layout, package name `voiceqa`, built with hatchling.
