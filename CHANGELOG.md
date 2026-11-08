@@ -13,7 +13,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - .gitattributes so text files always use LF line endings.
 - G.711 PCMU and PCMA encode and decode in pure NumPy, bit-exact with the old audioop module so it works on Python 3.13.
 - 16-bit PCM WAV read and write, stereo to mono downmix, and a sine test tone generator.
-- `ruff format --check .` in CI.
+- `ruff format --check .` in CI. Failing tests are listed as annotations on the CI run.
 - Media interface between SIP and RTP (LocalMedia, RemoteMedia, MediaSession).
 - Polyphase windowed-sinc resampler with anti-alias filtering, used to bring audio to 8 kHz for calls. 60 seconds of 48 kHz audio takes about 0.1 s.
 - RTP packet build and parse (RFC 3550, handles padding, CSRC and header extensions).
