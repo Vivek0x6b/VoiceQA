@@ -32,4 +32,4 @@ jobs:
       - name: report failures
         if: failure()
         shell: bash
-        run: grep -E "^(FAILED|ERROR) " pytest.log | sed 's/^/::error::/' || true
+        run: grep -E "^(FAILED|ERROR) tests/" pytest.log | sed 's/^/::error::/' || true
