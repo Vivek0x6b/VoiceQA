@@ -18,6 +18,7 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 - Known problems:
   - An in-dialog re-INVITE (for example a session timer refresh) is answered with 488 by both the UAC and the test agent, which some providers treat as a reason to drop the call. Issue 7 fixes this.
   - The test agent sends its in-dialog requests (BYE) to the address the INVITE came from, not along the Route set, so it does not work behind a proxy that needs Record-Route followed. It answers at once, so CANCEL never stops a call. INVITEs without an SDP offer get 488 from the agent and are not handled by the UAC either; issue 7 covers both.
+  - The test agent's RtpSession still keeps every received frame for `recording()`, about 16 kB per second of call. Echo itself does not use it. Issue 5 reworks recording.
   - SIP is UDP and IPv4 only, MD5 digest only, no REGISTER or CANCEL, no NAT rewrite of Contact from `received`/`rport`.
   - RTP has no RTCP, no DTMF and no symmetric RTP source check. `recording()` places audio by RTP timestamp only. Issues 5 and 6 need arrival times on a shared clock for the recordings and the round-trip latency.
   - On Windows the Proactor loop does not call `connection_lost` when a UDP transport closes with a send in flight. The SIP transport works around it with `abort()` after two yields.
