@@ -10,14 +10,15 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
   1. G.711 codec (PCMU/PCMA) and WAV I/O. Done.
   2. RTP sender and receiver with 20 ms pacing. Done.
   3. SIP UAC: INVITE, ACK, BYE, digest auth, SDP offer/answer. Done.
-  4. Not named yet.
-  5. Not named yet.
-  6. Not named yet.
-- Next issue: issue 4.
+  4. Local test agent: a SIP UAS that answers calls and either echoes the caller's audio or plays a WAV file.
+  5. Recording both directions on a shared clock: caller.wav, agent.wav and a stereo mix, plus events.json with timestamps for INVITE sent, ringing, answered, first RTP in, first RTP out and BYE.
+  6. End-to-end loopback test in CI: voiceqa calls the local test agent, sends a tone, receives the echo, and checks the audio and the measured round-trip latency.
+  7. Session refresh: answer an in-dialog re-INVITE or UPDATE with 200 OK and the current SDP instead of 488.
+- Next issue: issue 4 (local test agent).
 - Known problems:
-  - An in-dialog re-INVITE (for example a session timer refresh) is answered with 488, which some providers treat as a reason to drop the call.
+  - An in-dialog re-INVITE (for example a session timer refresh) is answered with 488, which some providers treat as a reason to drop the call. Issue 7 fixes this.
   - SIP is UDP and IPv4 only, MD5 digest only, no REGISTER or CANCEL, no NAT rewrite of Contact from `received`/`rport`.
-  - RTP has no RTCP, no DTMF and no symmetric RTP source check. `recording()` places audio by RTP timestamp only, so latency work in M4 will also need arrival times.
+  - RTP has no RTCP, no DTMF and no symmetric RTP source check. `recording()` places audio by RTP timestamp only. Issues 5 and 6 need arrival times on a shared clock for the recordings and the round-trip latency.
   - On Windows the Proactor loop does not call `connection_lost` when a UDP transport closes with a send in flight. The SIP transport works around it with `abort()` after two yields.
 
 ## Decisions

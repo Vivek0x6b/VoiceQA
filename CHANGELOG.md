@@ -9,7 +9,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Project scaffold with src layout and hatchling build.
 - `voiceqa version` and `voiceqa doctor` commands.
 - CI on Windows, macOS and Linux for Python 3.11 to 3.13.
-- Current status section in docs/ARCHITECTURE.md.
+- Current status section in docs/ARCHITECTURE.md, with the full list of M1 issues.
 - .gitattributes so text files always use LF line endings.
 - G.711 PCMU and PCMA encode and decode in pure NumPy, bit-exact with the old audioop module so it works on Python 3.13.
 - 16-bit PCM WAV read and write, stereo to mono downmix, and a sine test tone generator.
