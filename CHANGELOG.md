@@ -27,6 +27,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `place_call(on_event=...)` reports call events. `RtpSession.record(sink)` hands every sent and received frame to a sink with its time.
 - `place_call` reports a `call_rejected` event (status and reason) when the final response is a failure, so a rejected or unauthorized call shows up in events.json.
 - `WavWriter` for writing a WAV as audio comes in, and `read_wav_blocks` for reading one in pieces.
+- `voiceqa call` command: places one SIP call, sends a WAV file or a default test tone once answered, records both sides, and prints a plain text summary (answered, duration, frames sent and received, first-audio latency, recording folder). Exit code reflects whether the call was answered.
+- `first_loud_frame` in `voiceqa.audio.analysis`: finds the first 20 ms frame above a given RMS threshold in a WAV file, reading it in blocks. Used to compute first-audio latency for `voiceqa call`.
 
 ### Changed
 

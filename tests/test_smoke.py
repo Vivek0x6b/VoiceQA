@@ -47,3 +47,17 @@ def test_agent_help_lists_its_options():
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     for option in ("--host", "--port", "--play", "--hangup-after"):
         assert option in plain
+
+
+def test_call_help_lists_its_options():
+    result = runner.invoke(app, ["call", "--help"])
+    assert result.exit_code == 0
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    for option in ("--server", "--user", "--play", "--record-dir", "--duration", "--codec"):
+        assert option in plain
+
+
+def test_call_without_server_or_host_fails_with_bad_options():
+    result = runner.invoke(app, ["call", "agent"])
+    assert result.exit_code == 2
+    assert "--server" in result.output
