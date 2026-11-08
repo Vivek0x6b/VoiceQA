@@ -31,6 +31,9 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `first_loud_frame` in `voiceqa.audio.analysis`: finds the first 20 ms frame above a given RMS threshold in a WAV file, reading it in blocks. Used to compute first-audio latency for `voiceqa call`.
 - `voiceqa calibrate` command: calls a local echo agent with a train of short tone pulses instead of a real conversation, measures each pulse's round-trip delay, and writes `calibration.json` (median, p95, min, max, pulses sent and matched) into the recording folder. Pulses sent is the number the pulse train was built with, not a count of onsets found in the recording. This is VoiceQA's own round-trip floor, meant to be subtracted from latencies measured against a real voice agent. Exits 1 if fewer than half the pulses came back, and prints the call's reason when the echo agent did not answer.
 - `pulse_round_trip_delays` in `voiceqa.audio.analysis`: finds pulse onsets in a caller and an agent recording and pairs them up into round-trip delays, used by `voiceqa calibrate`. An onset right at the start of the recording, with no quiet before it to measure, is still counted.
+- `src/voiceqa/__main__.py`, so `python -m voiceqa` runs the CLI without the console script being on PATH.
+- End-to-end test: runs `voiceqa agent` and `voiceqa call` as real subprocesses through `python -m voiceqa`, and checks the exit code, the printed summary, the recorded files, the tone frequency and onset timing in agent.wav, and the order of events in events.json. Runs on Windows, macOS and Linux in CI.
+- README quick start section showing `voiceqa agent`, `voiceqa call` and `voiceqa calibrate` with real output and what lands in the recording folder.
 
 ### Changed
 
