@@ -25,6 +25,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `RtpSession.listen()` to get each received frame as it arrives. Echo mode uses it with a bounded 1 s buffer, so its work and memory per frame do not grow with call length.
 - Call recording on a shared clock: `CallRecorder` writes caller.wav, agent.wav, a stereo mix.wav and events.json (INVITE sent, ringing, answered, first RTP in and out, BYE). Audio is streamed to disk as it arrives, gaps are filled with silence, and both tracks end at the same length.
 - `place_call(on_event=...)` reports call events. `RtpSession.record(sink)` hands every sent and received frame to a sink with its time.
+- `place_call` reports a `call_rejected` event (status and reason) when the final response is a failure, so a rejected or unauthorized call shows up in events.json.
 - `WavWriter` for writing a WAV as audio comes in, and `read_wav_blocks` for reading one in pieces.
 
 ### Changed

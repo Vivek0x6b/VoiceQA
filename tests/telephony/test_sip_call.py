@@ -320,13 +320,16 @@ def test_wildcard_bind_advertises_routable_address():
 
 @pytest.mark.parametrize("code, header", [(401, "Authorization"), (407, "Proxy-Authorization")])
 def test_digest_challenge_then_accept(code, header):
+    seen = []
+
     async def scenario(uas):
-        call = await place_call(config(uas), "agent", LOCAL)
+        call = await place_call(config(uas), "agent", LOCAL, on_event=lambda n, **d: seen.append(n))
         await until(lambda: len(uas.transactions("ACK")) == 2)
         await call.hangup()
         return uas
 
     uas = run(scenario, challenges=[("n1", False)], challenge_code=code)
+    assert "call_rejected" not in seen
     first, second = uas.transactions("INVITE")
     assert first.cseq == (1, "INVITE")
     assert second.cseq == (2, "INVITE")
@@ -369,23 +372,32 @@ def test_failed_call_reports_no_answer():
 
     async def scenario(uas):
         with pytest.raises(SipStatusError):
-            await place_call(config(uas), "agent", LOCAL, on_event=lambda n, **d: seen.append(n))
+            await place_call(
+                config(uas), "agent", LOCAL, on_event=lambda n, **d: seen.append((n, d))
+            )
 
     run(scenario, final=486, final_reason="Busy Here")
-    assert seen == ["invite_sent", "ringing"]
+    assert [name for name, _ in seen] == ["invite_sent", "ringing", "call_rejected"]
+    assert seen[-1] == ("call_rejected", {"status": 486, "reason": "Busy Here"})
 
 
 @pytest.mark.parametrize("challenges", [[("n1", False), ("n2", False)], [("n1", False)] * 2])
 def test_rejected_credentials_fail(challenges):
+    seen = []
+
     async def scenario(uas):
         with pytest.raises(SipStatusError) as info:
-            await place_call(config(uas), "agent", LOCAL)
+            await place_call(
+                config(uas), "agent", LOCAL, on_event=lambda n, **d: seen.append((n, d))
+            )
         await until(lambda: len(uas.transactions("ACK")) == 2)
         return uas, info.value
 
     uas, err = run(scenario, challenges=challenges)
     assert err.status == 401
     assert uas.invite_count == 2
+    rejected = [detail for name, detail in seen if name == "call_rejected"]
+    assert rejected == [{"status": 401, "reason": err.reason}]
 
 
 def test_wrong_password_fails():

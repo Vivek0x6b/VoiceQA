@@ -38,7 +38,8 @@ _WILDCARDS = {"", "0.0.0.0"}
 
 # Called with an event name and details: invite_sent (each new INVITE,
 # including the one answering an auth challenge), ringing (first 18x, with
-# status), answered (first 2xx), bye_sent, bye_received.
+# status), answered (first 2xx), call_rejected (final status >= 300, with
+# status and reason), bye_sent, bye_received.
 OnEvent = Callable[..., None]
 
 
@@ -229,6 +230,7 @@ class SipCall:
 
         invite, resp = await self._with_auth(make)
         if resp.status >= 300:
+            self._on_event("call_rejected", status=resp.status, reason=resp.reason)
             raise SipStatusError(resp.status, resp.reason)
         self._dialog = Dialog.from_response(invite, resp)
         self._ack = ack_for_2xx(self._dialog, invite, self._via())
