@@ -228,9 +228,8 @@ def test_udp_transport_round_trip_and_garbage_dropped():
                     await asyncio.sleep(0.005)
         finally:
             raw.close()
-            a.close()
-            b.close()
-            await asyncio.sleep(0)
+            await a.aclose()
+            await b.aclose()
         return got, a.local_addr
 
     got, a_addr = asyncio.run(main())
