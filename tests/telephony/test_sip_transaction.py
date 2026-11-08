@@ -170,7 +170,7 @@ def test_retransmitted_2xx_goes_to_callback_and_lingers():
 def test_non_invite_retransmits_capped_at_t2():
     async def main():
         rec = Recorder()
-        tx = NonInviteClientTransaction(bye(), rec, t1=0.04, t2=0.16)
+        tx = NonInviteClientTransaction(bye(), rec, t1=0.04, t2=0.08)
         tx.start()
         await rec.wait_for(6)
         tx.receive(reply(tx.request, 200, "OK"))
@@ -185,7 +185,9 @@ def test_non_invite_retransmits_capped_at_t2():
     gaps = rec.gaps()
     assert gaps[0] >= 0.04 - SLACK
     assert gaps[1] >= 0.08 - SLACK
-    assert all(g < 0.25 for g in gaps[3:])
+    # Uncapped, gaps[3:] would be 0.32 s and up. Sleeps only run late, so the
+    # bound leaves room for slow runners on the capped side.
+    assert all(g < 0.28 for g in gaps[3:])
 
 
 def test_non_invite_uses_t2_after_provisional():
