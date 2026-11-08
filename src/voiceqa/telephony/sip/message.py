@@ -224,7 +224,10 @@ def parse_name_addr(value: str) -> NameAddr:
         gt = value.find(">", lt)
         if gt < 0:
             raise SipParseError(f"unclosed <: {value!r}")
-        display = value[:lt].strip().strip('"').replace('\\"', '"') or None
+        display = value[:lt].strip()
+        if len(display) >= 2 and display[0] == display[-1] == '"':
+            display = re.sub(r"\\(.)", r"\1", display[1:-1])
+        display = display or None
         return NameAddr(display, value[lt + 1 : gt], parse_params(value[gt + 1 :]))
     uri, _, params = value.partition(";")
     return NameAddr(None, uri.strip(), parse_params(params))
