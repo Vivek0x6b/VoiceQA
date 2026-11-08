@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import socket
 from collections.abc import Callable
 from typing import cast
 
@@ -12,6 +13,13 @@ log = logging.getLogger(__name__)
 
 Address = tuple[str, int]
 OnMessage = Callable[[Request | Response, Address], None]
+
+
+def routing_ip(server: Address) -> str:
+    # connect() on UDP sends nothing, it only picks the outgoing interface.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(server)
+        return s.getsockname()[0]
 
 
 class UdpTransport(asyncio.DatagramProtocol):

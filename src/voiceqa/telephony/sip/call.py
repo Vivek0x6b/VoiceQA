@@ -30,7 +30,7 @@ from voiceqa.telephony.sip.transaction import (
     InviteClientTransaction,
     NonInviteClientTransaction,
 )
-from voiceqa.telephony.sip.transport import Address, UdpTransport
+from voiceqa.telephony.sip.transport import Address, UdpTransport, routing_ip
 
 MAX_AUTH_RETRIES = 4
 _Transaction = InviteClientTransaction | NonInviteClientTransaction
@@ -56,13 +56,6 @@ def _target_uri(target: str, server_host: str) -> str:
     if target.startswith(("sip:", "sips:")):
         return target
     return f"sip:{target}@{server_host}"
-
-
-def _routing_ip(server: Address) -> str:
-    # connect() on UDP sends nothing, it only picks the outgoing interface.
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.connect(server)
-        return s.getsockname()[0]
 
 
 async def _resolve(host: str, port: int) -> Address:
@@ -289,7 +282,7 @@ async def place_call(config: SipConfig, target_uri: str, local_media: LocalMedia
     has no usable audio stream (the call is hung up first).
     """
     server = await _resolve(config.server_host, config.server_port)
-    host = _routing_ip(server) if config.local_host in _WILDCARDS else config.local_host
+    host = routing_ip(server) if config.local_host in _WILDCARDS else config.local_host
     call = SipCall(config, server, host)
     await call._open()
     try:
