@@ -20,3 +20,5 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `RtpSession`: G.711 RTP over UDP paced at 50 packets/s on absolute deadlines, with a recording placed by RTP timestamp so reordered, duplicate and missing packets are handled.
 - Minimal SIP UAC over UDP: INVITE with retransmission, MD5 digest auth for 401 and 407, ACK, BYE in both directions, and SDP offer/answer for PCMU and PCMA.
 - SIP and RTP socket tests run on both asyncio event loops (selector and, on Windows, proactor).
+- Minimal SIP UAS (`SipServer`) that answers calls with 100, 180 and 200, resends the 200 until the ACK arrives, answers resent requests, and handles BYE in both directions, OPTIONS and CANCEL. Offers without a common codec get 488.
+- Local test agent and `voiceqa agent` command: answers calls on a local port and echoes the caller's audio or plays a WAV file (any rate, mono or stereo), optionally hanging up after a set time.

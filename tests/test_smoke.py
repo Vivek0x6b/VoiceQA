@@ -31,3 +31,16 @@ def test_doctor_reports_ffmpeg_missing(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
     result = runner.invoke(app, ["doctor"])
     assert "ffmpeg: not found" in result.output
+
+
+def test_agent_refuses_a_missing_wav_before_listening(tmp_path):
+    result = runner.invoke(app, ["agent", "--port", "0", "--play", str(tmp_path / "nope.wav")])
+    assert result.exit_code != 0
+    assert "nope.wav" in result.output
+
+
+def test_agent_help_lists_its_options():
+    result = runner.invoke(app, ["agent", "--help"])
+    assert result.exit_code == 0
+    for option in ("--host", "--port", "--play", "--hangup-after"):
+        assert option in result.output
