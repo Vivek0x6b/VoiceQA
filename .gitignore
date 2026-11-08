@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# VoiceQA
+runs/
+recordings/
+*.wav
+models/
+.voiceqa/
