@@ -132,7 +132,11 @@ def test_recording_of_an_echo_call_lines_up_on_one_clock(tmp_path):
     assert abs(said - t["first_rtp_out"]) < 0.025
     assert 0 < heard - said < 0.2
     assert 23 <= loud_frames(caller) <= 26
-    assert 23 <= loud_frames(agent) <= 27
+    # The agent may slip a silence frame into the echo when its queue runs
+    # dry for a slot, which spreads the tone over more frames. Every frame
+    # still comes back, so compare energy instead of counting frames.
+    energy = np.sum(agent.astype(np.float64) ** 2) / np.sum(caller.astype(np.float64) ** 2)
+    assert 0.9 < energy < 1.1
 
 
 def test_play_sends_the_wav_resampled_to_8k(tmp_path):
