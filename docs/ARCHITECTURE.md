@@ -6,7 +6,7 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 
 - Current milestone: M1 (local SIP call with two-way audio and recording), in progress.
 - Finished issues: issue 1, G.711 codec (PCMU/PCMA) and WAV I/O. The project scaffold, CLI (`version`, `doctor`) and CI were done before that.
-- Next issue: M1 issue 2.
+- Next issue: issue 2 (RTP sender and receiver with 20 ms pacing) and issue 3 (SIP UAC with INVITE, ACK, BYE, digest auth and SDP offer/answer), worked on in parallel.
 - Known problems: none.
 
 ## Decisions
@@ -22,6 +22,17 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 - Audio inside VoiceQA is int16. Mono is a 1-D array, multichannel is (frames, channels). Audio functions are pure (arrays in, arrays out) so they can move to Rust later.
 - Resampling uses our own polyphase windowed-sinc filter instead of adding scipy as a dependency.
 
+## Media interface
+
+`src/voiceqa/telephony/media.py` is the contract between SIP and RTP. Neither side imports the other.
+
+1. RTP binds a local UDP socket and reports it as `LocalMedia(host, port, payload_types, ptime_ms)`.
+2. SIP puts `LocalMedia` in the SDP offer: `c=` host, `m=audio` port, payload types in preference order (PCMU 0, PCMA 8), `a=ptime:20`.
+3. SIP parses the SDP answer into `RemoteMedia(host, port, payload_type, ptime_ms)`. A rejected stream (port 0) or no common codec is a SIP error, not a `RemoteMedia`.
+4. RTP is started with `RemoteMedia` and implements the `MediaSession` protocol: `local`, `start(remote)`, `send(samples)`, `drain()`, `recording()`, `close()`.
+
+Audio crossing the boundary is int16 mono at 8 kHz in 160-sample (20 ms) frames. Only 20 ms ptime is supported for now.
+
 ## Layout
 
 ```
@@ -30,7 +41,9 @@ src/voiceqa/
     g711.py         PCMU and PCMA encode and decode
     wav.py          16-bit PCM WAV read and write
     dsp.py          downmix, resampling, test tones
-  telephony/sip/    SIP UAC and RTP
+  telephony/media.py  SIP to RTP contract (LocalMedia, RemoteMedia, MediaSession)
+  telephony/rtp/    RTP sender and receiver
+  telephony/sip/    SIP UAC and SDP
   telephony/local/  local loopback transport for tests and offline runs
   engine/           scenario runner and reporting
   cli/              Typer commands
