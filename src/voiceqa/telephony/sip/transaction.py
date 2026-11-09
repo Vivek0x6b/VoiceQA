@@ -1,4 +1,5 @@
-"""INVITE and non-INVITE client transactions for UDP (RFC 3261 section 17.1)."""
+"""INVITE and non-INVITE client transactions for UDP (RFC 3261 section 17.1),
+and the resending of a 2xx to an INVITE on the server side."""
 
 import asyncio
 from collections.abc import Callable
@@ -141,3 +142,54 @@ class NonInviteClientTransaction(_ClientTransaction):
         if not self._final.done():
             self._final.set_result(response)
         self.close()
+
+
+def server_key(request: Request) -> tuple[str, str] | None:
+    """Branch and method of a received request, to spot retransmissions."""
+    vias = request.headers.get_all("Via")
+    if not vias:
+        return None
+    branch = parse_via(vias[0]).branch
+    return (branch, request.method) if branch else None
+
+
+class OkRetransmitter:
+    """Resends a 2xx to an INVITE until the ACK arrives (RFC 3261 13.3.1.4).
+
+    The interval starts at T1 and doubles up to T2. If no ACK came after
+    64 * T1, resending stops and on_timeout is called.
+    """
+
+    def __init__(
+        self,
+        send: Callable[[], None],
+        t1: float,
+        t2: float,
+        on_timeout: Callable[[], None] | None = None,
+    ) -> None:
+        self._send = send
+        self._t1 = t1
+        self._t2 = t2
+        self._on_timeout = on_timeout
+        self._loop = asyncio.get_running_loop()
+        self._deadline = 0.0
+        self._handle: asyncio.TimerHandle | None = None
+
+    def start(self) -> None:
+        self._deadline = self._loop.time() + 64 * self._t1
+        self._handle = self._loop.call_later(self._t1, self._resend, 2 * self._t1)
+
+    def stop(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+
+    def _resend(self, interval: float) -> None:
+        if self._loop.time() >= self._deadline:
+            self._handle = None
+            if self._on_timeout is not None:
+                self._on_timeout()
+            return
+        self._send()
+        nxt = min(2 * interval, self._t2)
+        self._handle = self._loop.call_later(interval, self._resend, nxt)

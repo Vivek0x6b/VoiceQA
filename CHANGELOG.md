@@ -39,3 +39,6 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - `RtpSession` no longer keeps the received audio in memory, and `recording()` is gone. Received frames are placed by RTP timestamp on the local clock, and a short burst of late packets no longer shifts the rest of the call.
 - Media timing uses `time.perf_counter` instead of the event loop clock, which only ticks every 15.6 ms on Windows before Python 3.13.
+- Session refreshes no longer get 488. The UAC and the test agent answer an in-dialog re-INVITE or UPDATE with 200 and the SDP they sent before, resend that 200 until the ACK arrives, and keep media running. A re-INVITE without SDP gets the same SDP as an offer, and the answer in the ACK is ignored. An offer with no codec in common still gets 488, and the call stays up. A request with an older CSeq than the last one from the far end gets 500.
+- Our INVITE, our 200 to an INVITE, and refresh responses carry `Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, UPDATE`.
+- The UAC answers resent requests from the far end with the same response instead of handling them again.

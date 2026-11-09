@@ -2,6 +2,8 @@
 
 Every request goes to the configured server, used as an outbound proxy.
 Responses we send go back to the source address of the request (RFC 3581).
+An in-dialog re-INVITE or UPDATE (a session refresh) gets 200 with our
+original offer, and the media stays as it is.
 """
 
 import asyncio
@@ -12,9 +14,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from voiceqa import __version__
-from voiceqa.telephony.media import LocalMedia, RemoteMedia
+from voiceqa.telephony.media import LocalMedia, PayloadType, RemoteMedia
 from voiceqa.telephony.sip.auth import authorization_value, choose_challenge
-from voiceqa.telephony.sip.dialog import Dialog, ack_for_2xx, build_invite, via_value
+from voiceqa.telephony.sip.dialog import (
+    Dialog,
+    ack_for_2xx,
+    answer_refresh,
+    build_invite,
+    via_value,
+)
 from voiceqa.telephony.sip.errors import SdpError, SipAuthError, SipError, SipStatusError
 from voiceqa.telephony.sip.message import (
     Request,
@@ -23,12 +31,15 @@ from voiceqa.telephony.sip.message import (
     new_branch,
     new_call_id,
     new_tag,
+    parse_name_addr,
     parse_via,
 )
 from voiceqa.telephony.sip.sdp import build_offer, parse_answer
 from voiceqa.telephony.sip.transaction import (
     InviteClientTransaction,
     NonInviteClientTransaction,
+    OkRetransmitter,
+    server_key,
 )
 from voiceqa.telephony.sip.transport import Address, UdpTransport, routing_ip
 
@@ -98,6 +109,14 @@ class SipCall:
         self._dialog: Dialog | None = None
         self._ack: Request | None = None
         self._remote_media: RemoteMedia | None = None
+        # Our INVITE's offer, the SDP we sent last in this dialog.
+        self._local_sdp = ""
+        self._payload_types: tuple[PayloadType, ...] = ()
+        self._contact = ""
+        # Last response per received request, to answer retransmissions.
+        self._replies: dict[tuple[str, str], Response] = {}
+        # 2xx responses to re-INVITEs waiting for their ACK, by CSeq number.
+        self._resending: dict[int, OkRetransmitter] = {}
         self._ended = asyncio.Event()
         self._closed = False
 
@@ -140,6 +159,9 @@ class SipCall:
         self._ended.set()
         for tx in list(self._transactions.values()):
             tx.close()
+        for resender in self._resending.values():
+            resender.stop()
+        self._resending.clear()
         return True
 
     def _close(self) -> None:
@@ -210,6 +232,9 @@ class SipCall:
         cfg = self._config
         host, port = self.local_addr
         offer = build_offer(local)
+        self._local_sdp = offer
+        self._payload_types = local.payload_types
+        self._contact = f"<sip:{cfg.username}@{host}:{port}>"
         from_tag = new_tag()
         cseq = itertools.count(1)
 
@@ -288,10 +313,25 @@ class SipCall:
 
     def _on_request(self, req: Request, addr: Address) -> None:
         assert self._transport is not None
+        dialog = self._dialog if self._dialog is not None and self._dialog.matches(req) else None
+        in_dialog = dialog is not None
         if req.method == "ACK":
+            # The answer an ACK may carry is not read: the session stays as it is.
+            resender = self._resending.pop(req.cseq[0], None) if in_dialog else None
+            if resender is not None:
+                resender.stop()
             return
-        if req.method == "BYE":
-            if self._dialog is not None and self._dialog.matches(req):
+        key = server_key(req)
+        if key is not None and key in self._replies:
+            self._transport.send(self._replies[key], addr)
+            return
+        if dialog is not None and req.method != "CANCEL" and not dialog.accept_seq(req):
+            resp = build_response(req, 500, "Server Internal Error")
+        elif req.method in ("INVITE", "UPDATE") and in_dialog:
+            resp = answer_refresh(req, self._local_sdp, self._payload_types, self._contact)
+            resp.headers.add("User-Agent", self._config.user_agent)
+        elif req.method == "BYE":
+            if in_dialog:
                 if not self.ended:
                     self._on_event("bye_received")
                 self._ended.set()
@@ -300,11 +340,40 @@ class SipCall:
                 resp = build_response(req, 481, "Call/Transaction Does Not Exist")
         elif req.method == "OPTIONS":
             resp = build_response(req, 200, "OK")
-        elif req.method == "INVITE":
+        elif req.method == "INVITE" and parse_name_addr(req.headers.get("To") or "").tag is None:
+            # We place calls, we do not take them.
             resp = build_response(req, 488, "Not Acceptable Here")
+        elif req.method in ("INVITE", "UPDATE"):
+            resp = build_response(req, 481, "Call/Transaction Does Not Exist")
         else:
             resp = build_response(req, 501, "Not Implemented")
+        self._reply(req, addr, resp, key)
+
+    def _reply(
+        self, req: Request, addr: Address, resp: Response, key: tuple[str, str] | None
+    ) -> None:
+        assert self._transport is not None
+        if key is not None:
+            self._replies[key] = resp
+            # Timer J / H: keep the answer around for retransmissions.
+            loop = asyncio.get_running_loop()
+            loop.call_later(64 * self._config.timer_t1, self._replies.pop, key, None)
         self._transport.send(resp, addr)
+        if req.method == "INVITE" and resp.status == 200:
+            t1, t2 = self._config.timer_t1, self._config.timer_t2
+            seq = req.cseq[0]
+            resender = OkRetransmitter(
+                lambda: self._send_to(resp, addr),
+                t1,
+                t2,
+                lambda: self._resending.pop(seq, None),
+            )
+            self._resending[seq] = resender
+            resender.start()
+
+    def _send_to(self, msg: Response, addr: Address) -> None:
+        if self._transport is not None and not self._closed:
+            self._transport.send(msg, addr)
 
 
 async def place_call(

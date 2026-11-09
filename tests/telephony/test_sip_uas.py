@@ -25,9 +25,11 @@ class FakeMedia:
         self.local = LocalMedia(host=host, port=port, payload_types=payload_types)
         self.remote = None
         self.closed = False
+        self.starts = 0
 
     async def start(self, remote):
         self.remote = remote
+        self.starts += 1
 
     def send(self, samples):
         pass
@@ -418,6 +420,8 @@ def test_same_call_id_from_a_new_transaction_is_a_merged_request():
         ("OPTIONS", None, 200),
         ("CANCEL", None, 481),
         ("INVITE", "x", 481),
+        ("UPDATE", "x", 481),
+        ("UPDATE", None, 481),
         ("REGISTER", None, 501),
     ],
 )
@@ -453,18 +457,137 @@ def test_cancel_after_answer_gets_200_and_the_call_stays_up():
     run(scenario)
 
 
-def test_reinvite_in_dialog_is_refused_without_ending_the_call():
+async def answered_raw_call(server, agent):
+    peer = await raw_peer()
+    send(peer, server, raw_invite(peer, server))
+    await until(lambda: peer.responses("INVITE", 200))
+    ok = peer.responses("INVITE", 200)[0]
+    send(peer, server, in_dialog(peer, ok, "ACK", 1))
+    await until(lambda: agent.calls)
+    return peer, ok
+
+
+def with_sdp(req, sdp):
+    req.headers.add("Contact", "<sip:1001@127.0.0.1>")
+    req.headers.add("Content-Type", "application/sdp")
+    req.body = sdp.encode()
+    return req
+
+
+def answers(peer, method, cseq, status=200):
+    return [r for r in peer.responses(method, status) if r.cseq[0] == cseq]
+
+
+async def hang_up_raw(peer, server, ok, cseq):
+    send(peer, server, in_dialog(peer, ok, "BYE", cseq))
+    await until(lambda: answers(peer, "BYE", cseq))
+    peer.transport.close()
+
+
+def assert_media_untouched(agent, call):
+    (media,) = agent.media
+    assert media.starts == 1
+    assert not media.closed
+    assert not call.ended
+
+
+def test_reinvite_with_offer_gets_the_same_sdp_until_acked():
     async def scenario(server, agent):
-        peer = await raw_peer()
-        send(peer, server, raw_invite(peer, server))
-        await until(lambda: peer.responses("INVITE", 200))
-        ok = peer.responses("INVITE", 200)[0]
-        send(peer, server, in_dialog(peer, ok, "ACK", 1))
-        reinvite = in_dialog(peer, ok, "INVITE", 2)
-        send(peer, server, reinvite)
+        peer, ok = await answered_raw_call(server, agent)
+        send(peer, server, with_sdp(in_dialog(peer, ok, "INVITE", 2), build_offer(CALLER_MEDIA)))
+        await until(lambda: len(answers(peer, "INVITE", 2)) >= 3)
+        first = answers(peer, "INVITE", 2)[0]
+        assert first.body == ok.body
+        assert first.headers.get("Content-Type") == "application/sdp"
+        assert first.headers.get("Contact") == ok.headers.get("Contact")
+        assert "UPDATE" in first.headers.get("Allow")
+        assert first.headers.get("To") == ok.headers.get("To")
+        assert all(r.to_bytes() == first.to_bytes() for r in answers(peer, "INVITE", 2))
+        send(peer, server, in_dialog(peer, ok, "ACK", 2))
+        await asyncio.sleep(0.05)
+        count = len(answers(peer, "INVITE", 2))
+        await asyncio.sleep(0.4)  # well past the T2 cap of 0.16 s
+        assert len(answers(peer, "INVITE", 2)) == count
+        assert_media_untouched(agent, agent.calls[0])
+        await hang_up_raw(peer, server, ok, 3)
+        assert answers(peer, "BYE", 3)[0].status == 200
+
+    run(scenario)
+
+
+def test_reinvite_without_sdp_gets_our_sdp_as_an_offer():
+    async def scenario(server, agent):
+        peer, ok = await answered_raw_call(server, agent)
+        send(peer, server, in_dialog(peer, ok, "INVITE", 2))
+        await until(lambda: answers(peer, "INVITE", 2))
+        offer = answers(peer, "INVITE", 2)[0]
+        assert offer.body == ok.body
+        assert offer.headers.get("Content-Type") == "application/sdp"
+        ack = with_sdp(in_dialog(peer, ok, "ACK", 2), build_offer(CALLER_MEDIA))
+        send(peer, server, ack)
+        await asyncio.sleep(0.05)
+        count = len(answers(peer, "INVITE", 2))
+        await asyncio.sleep(0.4)
+        assert len(answers(peer, "INVITE", 2)) == count
+        assert_media_untouched(agent, agent.calls[0])
+        await hang_up_raw(peer, server, ok, 3)
+
+    run(scenario)
+
+
+def test_update_with_and_without_sdp_gets_200():
+    async def scenario(server, agent):
+        peer, ok = await answered_raw_call(server, agent)
+        send(peer, server, with_sdp(in_dialog(peer, ok, "UPDATE", 2), build_offer(CALLER_MEDIA)))
+        await until(lambda: answers(peer, "UPDATE", 2))
+        with_body = answers(peer, "UPDATE", 2)[0]
+        assert with_body.body == ok.body
+        assert with_body.headers.get("Content-Type") == "application/sdp"
+        assert with_body.headers.get("Contact") == ok.headers.get("Contact")
+        send(peer, server, in_dialog(peer, ok, "UPDATE", 3))
+        await until(lambda: answers(peer, "UPDATE", 3))
+        bare = answers(peer, "UPDATE", 3)[0]
+        assert bare.body == b""
+        assert "Content-Type" not in bare.headers
+        assert_media_untouched(agent, agent.calls[0])
+        await hang_up_raw(peer, server, ok, 4)
+
+    run(scenario)
+
+
+def test_reinvite_without_a_common_codec_gets_488_and_the_call_stays_up():
+    async def scenario(server, agent):
+        peer, ok = await answered_raw_call(server, agent)
+        pcma_only = LocalMedia(host="127.0.0.1", port=40000, payload_types=(PayloadType.PCMA,))
+        send(peer, server, with_sdp(in_dialog(peer, ok, "INVITE", 2), build_offer(pcma_only)))
         await until(lambda: peer.responses("INVITE", 488))
-        assert not agent.calls[0].ended
-        peer.transport.close()
+        assert not answers(peer, "INVITE", 2)
+        assert_media_untouched(agent, agent.calls[0])
+        await hang_up_raw(peer, server, ok, 3)
+        assert answers(peer, "BYE", 3)[0].status == 200
+
+    run(scenario, payload_types=(PayloadType.PCMU,))
+
+
+def test_reinvite_with_wrong_tags_gets_481():
+    async def scenario(server, agent):
+        peer, ok = await answered_raw_call(server, agent)
+        stray = raw_request(peer, "INVITE", call_id=ok.headers.get("Call-ID"), to_tag="wrong")
+        send(peer, server, stray)
+        await until(lambda: peer.responses("INVITE", 481))
+        assert_media_untouched(agent, agent.calls[0])
+        await hang_up_raw(peer, server, ok, 6)
+
+    run(scenario)
+
+
+def test_reinvite_with_an_old_cseq_gets_500():
+    async def scenario(server, agent):
+        peer, ok = await answered_raw_call(server, agent)
+        send(peer, server, with_sdp(in_dialog(peer, ok, "INVITE", 1), build_offer(CALLER_MEDIA)))
+        await until(lambda: peer.responses("INVITE", 500))
+        assert_media_untouched(agent, agent.calls[0])
+        await hang_up_raw(peer, server, ok, 2)
 
     run(scenario)
 

@@ -8,6 +8,9 @@ dialog (BYE) go to the address the INVITE came from, so the agent works
 behind the caller's NAT but not through a proxy that expects its Route set
 to be followed.
 
+An in-dialog re-INVITE or UPDATE (a session refresh) gets 200 with the SDP
+we sent before, and media keeps running untouched.
+
 Media is opened through a callback that returns a MediaSession, so this
 module never touches RTP.
 """
@@ -20,7 +23,7 @@ from dataclasses import dataclass
 
 from voiceqa import __version__
 from voiceqa.telephony.media import MediaSession, PayloadType, RemoteMedia
-from voiceqa.telephony.sip.dialog import ALLOW, Dialog, via_value
+from voiceqa.telephony.sip.dialog import ALLOW, Dialog, answer_refresh, via_value
 from voiceqa.telephony.sip.errors import SdpError, SipError
 from voiceqa.telephony.sip.message import (
     Request,
@@ -32,7 +35,11 @@ from voiceqa.telephony.sip.message import (
     parse_via,
 )
 from voiceqa.telephony.sip.sdp import build_answer, parse_offer
-from voiceqa.telephony.sip.transaction import NonInviteClientTransaction
+from voiceqa.telephony.sip.transaction import (
+    NonInviteClientTransaction,
+    OkRetransmitter,
+    server_key,
+)
 from voiceqa.telephony.sip.transport import Address, UdpTransport, routing_ip
 
 log = logging.getLogger(__name__)
@@ -64,6 +71,8 @@ class ServerCall:
         dialog: Dialog,
         media: MediaSession,
         remote_media: RemoteMedia,
+        local_sdp: str,
+        contact: str,
     ) -> None:
         self.call_id = dialog.call_id
         self.peer = peer
@@ -71,12 +80,16 @@ class ServerCall:
         self.remote_media = remote_media
         self.invite = invite
         self.dialog = dialog
+        # The SDP we sent last in this dialog. Session refreshes get it again.
+        self.local_sdp = local_sdp
+        self.contact = contact
         self.ok: Response | None = None
         self.task: asyncio.Task | None = None
         self._server = server
         self._ended = asyncio.Event()
         self._closed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._resend: asyncio.TimerHandle | None = None
+        # 2xx responses waiting for their ACK, by CSeq number.
+        self._resending: dict[int, OkRetransmitter] = {}
         self._confirmed = asyncio.Event()
         self._bye_sent = False
 
@@ -102,31 +115,43 @@ class ServerCall:
 
     def _start_resending(self, ok: Response) -> None:
         self.ok = ok
-        t1 = self._server.config.timer_t1
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 64 * t1
 
-        def resend(interval: float) -> None:
-            if loop.time() >= deadline:
-                self._resend = None
-                self._confirmed.set()
-                log.info("no ACK for call %s, hanging up", self.call_id)
-                self._server._spawn(self.hangup())
-                return
-            self._server._transport_send(ok, self.peer)
-            nxt = min(2 * interval, self._server.config.timer_t2)
-            self._resend = loop.call_later(interval, resend, nxt)
+        def no_ack() -> None:
+            self._confirmed.set()
+            log.info("no ACK for call %s, hanging up", self.call_id)
+            self._server._spawn(self.hangup())
 
-        self._resend = loop.call_later(t1, resend, 2 * t1)
+        self._resend_until_acked(ok, self.peer, no_ack)
+
+    def _resend_until_acked(
+        self, ok: Response, peer: Address, on_timeout: Callable[[], None] | None = None
+    ) -> None:
+        seq = ok.cseq[0]
+
+        def timeout() -> None:
+            self._resending.pop(seq, None)
+            if on_timeout is not None:
+                on_timeout()
+
+        cfg = self._server.config
+        resender = OkRetransmitter(
+            lambda: self._server._transport_send(ok, peer), cfg.timer_t1, cfg.timer_t2, timeout
+        )
+        self._resending[seq] = resender
+        resender.start()
+
+    def _acked(self, seq: int) -> None:
+        resender = self._resending.pop(seq, None)
+        if resender is not None:
+            resender.stop()
+        if seq == self.invite.cseq[0]:
+            self._confirmed.set()
 
     def _confirm(self) -> None:
         self._confirmed.set()
-        self._stop_resending()
-
-    def _stop_resending(self) -> None:
-        if self._resend is not None:
-            self._resend.cancel()
-            self._resend = None
+        for resender in self._resending.values():
+            resender.stop()
+        self._resending.clear()
 
     def _end(self) -> None:
         if self.ended:
@@ -226,7 +251,7 @@ class SipServer:
         return resp
 
     def _answer(self, req: Request, peer: Address, resp: Response) -> None:
-        key = self._key(req)
+        key = server_key(req)
         if key is not None:
             self._answered[key] = resp
             if resp.status >= 200:
@@ -234,14 +259,6 @@ class SipServer:
                 loop = asyncio.get_running_loop()
                 loop.call_later(64 * self.config.timer_t1, self._answered.pop, key, None)
         self._transport_send(resp, peer)
-
-    @staticmethod
-    def _key(req: Request) -> tuple[str, str] | None:
-        vias = req.headers.get_all("Via")
-        if not vias:
-            return None
-        branch = parse_via(vias[0]).branch
-        return (branch, req.method) if branch else None
 
     def _via(self, peer: Address) -> str:
         host = self._host_for(peer)
@@ -275,7 +292,7 @@ class SipServer:
         if req.method == "ACK":
             self._on_ack(req)
             return
-        key = self._key(req)
+        key = server_key(req)
         if key is not None and key in self._answered:
             self._transport_send(self._answered[key], peer)
             return
@@ -283,11 +300,17 @@ class SipServer:
         in_dialog = call is not None and call.dialog.matches(req)
         has_to_tag = parse_name_addr(req.headers.get("To") or "").tag is not None
 
-        if req.method == "INVITE":
-            if in_dialog:
-                # Session refresh is not supported yet; the call stays up.
-                self._reply(req, peer, 488, "Not Acceptable Here")
-            elif has_to_tag:
+        if in_dialog and req.method != "CANCEL":
+            assert call is not None
+            if not call.dialog.accept_seq(req):
+                self._reply(req, peer, 500, "Server Internal Error")
+                return
+
+        if req.method in ("INVITE", "UPDATE") and in_dialog:
+            assert call is not None
+            self._refresh(call, req, peer)
+        elif req.method == "INVITE":
+            if has_to_tag:
                 self._reply(req, peer, 481, "Call/Transaction Does Not Exist")
             elif call is not None or req.headers.get("Call-ID") in self._pending:
                 self._reply(req, peer, 482, "Loop Detected")
@@ -307,16 +330,28 @@ class SipServer:
                 self._reply(req, peer, 200, "OK")
             else:
                 self._reply(req, peer, 481, "Call/Transaction Does Not Exist")
+        elif req.method == "UPDATE":
+            self._reply(req, peer, 481, "Call/Transaction Does Not Exist")
         elif req.method == "OPTIONS":
             resp = self._reply(req, peer, 200, "OK")
             resp.headers.add("Allow", ALLOW)
         else:
             self._reply(req, peer, 501, "Not Implemented")
 
+    def _refresh(self, call: ServerCall, req: Request, peer: Address) -> None:
+        # Media keeps running as it is, whatever the offer says.
+        resp = answer_refresh(req, call.local_sdp, self.config.payload_types, call.contact)
+        resp.headers.add("Server", self.config.user_agent)
+        self._answer(req, peer, resp)
+        if req.method == "INVITE" and resp.status == 200:
+            call._resend_until_acked(resp, peer)
+
     def _on_ack(self, ack: Request) -> None:
+        # An ACK may carry the answer to the offer in a refresh 200. We keep
+        # the session as it is, so the answer is not read.
         call = self._calls.get(ack.headers.get("Call-ID") or "")
-        if call is not None and call.dialog.matches(ack) and ack.cseq[0] == call.invite.cseq[0]:
-            call._confirm()
+        if call is not None and call.dialog.matches(ack):
+            call._acked(ack.cseq[0])
 
     def _on_invite(self, invite: Request, peer: Address) -> None:
         try:
@@ -350,12 +385,13 @@ class SipServer:
                 return
             self._reply(invite, peer, 180, "Ringing", tag)
             dialog = Dialog.from_invite(invite, tag)
-            call = ServerCall(self, invite, peer, dialog, media, remote)
+            contact = f"<sip:{self.config.user}@{host}:{self.local_addr[1]}>"
+            call = ServerCall(self, invite, peer, dialog, media, remote, answer, contact)
             ok = build_response(invite, 200, "OK")
             ok.headers.set("To", dialog.local_from)
             for rr in invite.headers.get_all("Record-Route"):
                 ok.headers.add("Record-Route", rr)
-            ok.headers.add("Contact", f"<sip:{self.config.user}@{host}:{self.local_addr[1]}>")
+            ok.headers.add("Contact", contact)
             ok.headers.add("Allow", ALLOW)
             ok.headers.add("Server", self.config.user_agent)
             ok.headers.add("Content-Type", "application/sdp")

@@ -199,17 +199,28 @@ class FakeUas(asyncio.DatagramProtocol):
             return
         self.send(self.reply(req, 200, "OK", tag=None))
 
-    def send_bye(self, *, call_id=None, from_tag="uastag"):
+    def in_dialog(self, method, cseq, *, sdp=None, call_id=None, from_tag="uastag"):
         inv = self.dialog_request
         h = Headers()
         h.add("Via", f"SIP/2.0/UDP 127.0.0.1:{self.port};branch={new_branch()}")
         h.add("From", inv.headers.get("To") + f";tag={from_tag}")
         h.add("To", inv.headers.get("From"))
         h.add("Call-ID", call_id or inv.headers.get("Call-ID"))
-        h.add("CSeq", "1 BYE")
-        bye = Request("BYE", parse_name_addr(inv.headers.get("Contact")).uri, h)
+        h.add("CSeq", f"{cseq} {method}")
+        req = Request(method, parse_name_addr(inv.headers.get("Contact")).uri, h)
+        if sdp is not None:
+            h.add("Contact", f"<sip:agent@127.0.0.1:{self.port}>")
+            h.add("Content-Type", "application/sdp")
+            req.body = sdp.encode()
+        return req
+
+    def send_bye(self, *, call_id=None, from_tag="uastag"):
+        bye = self.in_dialog("BYE", 1, call_id=call_id, from_tag=from_tag)
         self.send(bye)
         return bye
+
+    def answers(self, method, cseq, status=200):
+        return [r for r in self.responses(method) if r.cseq[0] == cseq and r.status == status]
 
 
 async def start_uas(**kw):
@@ -285,6 +296,7 @@ def test_basic_call_and_hangup():
     assert invite.headers.get("To") == "<sip:agent@pbx.test>"
     assert b"m=audio 40000 RTP/AVP 0 8\r\n" in invite.body
     assert invite.headers.get("Content-Type") == "application/sdp"
+    assert "UPDATE" in invite.headers.get("Allow")
 
     (ack,) = uas.transactions("ACK")
     assert ack.uri == f"sip:agent@127.0.0.1:{uas.port}"
@@ -606,3 +618,99 @@ def test_stray_messages_do_not_break_the_call():
     uas = run(scenario)
     assert uas.responses("OPTIONS")[0].status == 200
     assert [r.status for r in uas.responses("BYE")] == [481, 200]
+
+
+def test_reinvite_with_offer_gets_our_offer_again_until_acked():
+    async def scenario(uas):
+        call = await place_call(config(uas), "agent", LOCAL)
+        uas.send(uas.in_dialog("INVITE", 5, sdp=sdp_answer()))
+        await until(lambda: len(uas.answers("INVITE", 5)) >= 3)
+        first = uas.answers("INVITE", 5)[0]
+        assert first.body == uas.dialog_request.body
+        assert first.headers.get("Content-Type") == "application/sdp"
+        assert first.headers.get("Contact") == uas.dialog_request.headers.get("Contact")
+        assert "UPDATE" in first.headers.get("Allow")
+        assert all(r.to_bytes() == first.to_bytes() for r in uas.answers("INVITE", 5))
+        uas.send(uas.in_dialog("ACK", 5))
+        await asyncio.sleep(0.05)
+        count = len(uas.answers("INVITE", 5))
+        await asyncio.sleep(0.4)  # well past the T2 cap of 0.16 s
+        assert len(uas.answers("INVITE", 5)) == count
+        assert not call.ended
+        await call.hangup()
+        return uas
+
+    uas = run(scenario)
+    assert one_transaction(uas.transactions("BYE")).cseq == (2, "BYE")
+
+
+def test_reinvite_without_sdp_gets_our_offer():
+    async def scenario(uas):
+        call = await place_call(config(uas), "agent", LOCAL)
+        uas.send(uas.in_dialog("INVITE", 5))
+        await until(lambda: uas.answers("INVITE", 5))
+        assert uas.answers("INVITE", 5)[0].body == uas.dialog_request.body
+        uas.send(uas.in_dialog("ACK", 5, sdp=sdp_answer()))
+        await asyncio.sleep(0.05)
+        count = len(uas.answers("INVITE", 5))
+        await asyncio.sleep(0.4)
+        assert len(uas.answers("INVITE", 5)) == count
+        assert not call.ended
+        assert call.remote_media == RemoteMedia("127.0.0.1", 30000, PayloadType.PCMA)
+        await call.hangup()
+
+    run(scenario)
+
+
+def test_update_with_and_without_sdp_gets_200():
+    async def scenario(uas):
+        call = await place_call(config(uas), "agent", LOCAL)
+        uas.send(uas.in_dialog("UPDATE", 5, sdp=sdp_answer()))
+        await until(lambda: uas.answers("UPDATE", 5))
+        assert uas.answers("UPDATE", 5)[0].body == uas.dialog_request.body
+        uas.send(uas.in_dialog("UPDATE", 6))
+        await until(lambda: uas.answers("UPDATE", 6))
+        bare = uas.answers("UPDATE", 6)[0]
+        assert bare.body == b""
+        assert "Content-Type" not in bare.headers
+        assert not call.ended
+        await call.hangup()
+
+    run(scenario)
+
+
+def test_reinvite_without_a_common_codec_gets_488_and_the_call_stays_up():
+    async def scenario(uas):
+        call = await place_call(config(uas), "agent", LOCAL)
+        uas.send(uas.in_dialog("INVITE", 5, sdp=sdp_answer(pts="18")))
+        await until(lambda: uas.answers("INVITE", 5, 488))
+        assert not call.ended
+        await call.hangup()
+
+    run(scenario)
+
+
+def test_reinvite_outside_the_dialog_gets_481():
+    async def scenario(uas):
+        call = await place_call(config(uas), "agent", LOCAL)
+        uas.send(uas.in_dialog("INVITE", 5, sdp=sdp_answer(), from_tag="wrongtag"))
+        uas.send(uas.in_dialog("UPDATE", 6, from_tag="wrongtag"))
+        await until(lambda: uas.answers("INVITE", 5, 481) and uas.answers("UPDATE", 6, 481))
+        assert not call.ended
+        await call.hangup()
+
+    run(scenario)
+
+
+def test_reinvite_with_an_old_cseq_gets_500():
+    async def scenario(uas):
+        call = await place_call(config(uas), "agent", LOCAL)
+        uas.send(uas.in_dialog("INVITE", 5, sdp=sdp_answer()))
+        await until(lambda: uas.answers("INVITE", 5))
+        uas.send(uas.in_dialog("ACK", 5))
+        uas.send(uas.in_dialog("INVITE", 4, sdp=sdp_answer()))
+        await until(lambda: uas.answers("INVITE", 4, 500))
+        assert not call.ended
+        await call.hangup()
+
+    run(scenario)

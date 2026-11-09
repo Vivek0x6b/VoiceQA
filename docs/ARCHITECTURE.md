@@ -16,7 +16,7 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
   7. Session refresh: answer an in-dialog re-INVITE or UPDATE with 200 OK and the current SDP instead of 488. Also handle INVITEs without an SDP offer, which some providers send: put our offer in the 200 OK and take the answer from the ACK.
 - Next issue: issue 7 (session refresh and INVITEs without an SDP offer).
 - Known problems:
-  - An in-dialog re-INVITE (for example a session timer refresh) is answered with 488 by both the UAC and the test agent, which some providers treat as a reason to drop the call. Issue 7 fixes this.
+  - A session refresh (re-INVITE or UPDATE) is answered with 200 and the SDP we sent before, and media keeps running as it was. If the offer moves the far end's media to a new address, port or codec, we do not follow it. Session timers (RFC 4028) are not supported: a refresh with Session-Expires gets a plain 200.
   - The test agent sends its in-dialog requests (BYE) to the address the INVITE came from, not along the Route set, so it does not work behind a proxy that needs Record-Route followed. It answers at once, so CANCEL never stops a call. INVITEs without an SDP offer get 488 from the agent and are not handled by the UAC either; issue 7 covers both.
   - SIP is UDP and IPv4 only, MD5 digest only, no REGISTER or CANCEL, no NAT rewrite of Contact from `received`/`rport`.
   - RTP has no RTCP, no DTMF and no symmetric RTP source check.

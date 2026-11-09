@@ -1,11 +1,20 @@
-"""INVITE building and the UAC side of a dialog (RFC 3261 section 12). No I/O here."""
+"""INVITE building and both sides of a dialog (RFC 3261 section 12). No I/O here."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from voiceqa.telephony.sip.message import Headers, Request, Response, parse_name_addr
+from voiceqa.telephony.media import PayloadType
+from voiceqa.telephony.sip.errors import SdpError
+from voiceqa.telephony.sip.message import (
+    Headers,
+    Request,
+    Response,
+    build_response,
+    parse_name_addr,
+)
+from voiceqa.telephony.sip.sdp import parse_offer
 
-ALLOW = "INVITE, ACK, BYE, OPTIONS"
+ALLOW = "INVITE, ACK, BYE, CANCEL, OPTIONS, UPDATE"
 
 
 def via_value(host: str, port: int, branch: str) -> str:
@@ -59,6 +68,7 @@ class Dialog:
     remote_target: str
     route_set: tuple[str, ...]
     local_seq: int
+    remote_seq: int | None = None
 
     @classmethod
     def from_response(cls, invite: Request, response: Response) -> "Dialog":
@@ -93,6 +103,7 @@ class Dialog:
             remote_target=target,
             route_set=tuple(invite.headers.get_all("Record-Route")),
             local_seq=0,
+            remote_seq=invite.cseq[0],
         )
 
     def make_request(self, method: str, via: str, cseq: int | None = None) -> Request:
@@ -116,6 +127,38 @@ class Dialog:
             and parse_name_addr(request.headers.get("To") or "").tag == self.local_tag
             and parse_name_addr(request.headers.get("From") or "").tag == self.remote_tag
         )
+
+    def accept_seq(self, request: Request) -> bool:
+        """Track the far end's CSeq. False for a request that is out of order (RFC 3261 12.2.2)."""
+        seq = request.cseq[0]
+        if self.remote_seq is not None and seq <= self.remote_seq:
+            return False
+        self.remote_seq = seq
+        return True
+
+
+def answer_refresh(
+    request: Request, local_sdp: str, payload_types: Sequence[PayloadType], contact: str
+) -> Response:
+    """Answer an in-dialog re-INVITE or UPDATE without changing the session.
+
+    local_sdp is the SDP we sent last in this dialog. An offer gets it back as
+    the answer, or 488 if the offer has no codec in common with ours. A
+    re-INVITE without an offer gets it as our offer (the answer comes in the
+    ACK). An UPDATE without SDP gets an empty 200.
+    """
+    if request.body:
+        try:
+            parse_offer(request.body, payload_types)
+        except SdpError:
+            return build_response(request, 488, "Not Acceptable Here")
+    resp = build_response(request, 200, "OK")
+    resp.headers.add("Contact", contact)
+    resp.headers.add("Allow", ALLOW)
+    if request.method == "INVITE" or request.body:
+        resp.headers.add("Content-Type", "application/sdp")
+        resp.body = local_sdp.encode()
+    return resp
 
 
 def ack_for_2xx(dialog: Dialog, invite: Request, via: str) -> Request:

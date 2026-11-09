@@ -15,6 +15,9 @@ from voiceqa.telephony.media import FRAME_SAMPLES, SAMPLE_RATE
 from voiceqa.telephony.recording import CallRecorder
 from voiceqa.telephony.rtp import RtpSession
 from voiceqa.telephony.sip import SipConfig, place_call
+from voiceqa.telephony.sip.dialog import via_value
+from voiceqa.telephony.sip.message import Response, new_branch, parse_message
+from voiceqa.telephony.sip.sdp import build_offer
 
 
 def caller_config(agent):
@@ -34,10 +37,14 @@ def agent_config(**kw):
     return AgentConfig(**args)
 
 
-def loud_frames(audio, threshold=2000):
+def frame_rms(audio):
     n = len(audio) // FRAME_SAMPLES
     frames = audio[: n * FRAME_SAMPLES].reshape(n, FRAME_SAMPLES).astype(np.float64)
-    return int((np.sqrt((frames**2).mean(axis=1)) > threshold).sum())
+    return np.sqrt((frames**2).mean(axis=1))
+
+
+def loud_frames(audio, threshold=2000):
+    return int((frame_rms(audio) > threshold).sum())
 
 
 def dominant_hz(audio):
@@ -46,8 +53,11 @@ def dominant_hz(audio):
     return np.fft.rfftfreq(len(loud), 1 / SAMPLE_RATE)[spectrum.argmax()]
 
 
-async def record_call(agent, directory, send=None, listen=1.5, media_delay=0.0):
-    """Call the agent, optionally send audio, and record both sides to directory."""
+async def record_call(agent, directory, send=None, listen=1.5, media_delay=0.0, during=None):
+    """Call the agent, optionally send audio, and record both sides to directory.
+
+    during, if given, is awaited with the call while listening.
+    """
     rec = CallRecorder(directory)
     try:
         rtp = await RtpSession.open(bind_host="127.0.0.1")
@@ -59,7 +69,10 @@ async def record_call(agent, directory, send=None, listen=1.5, media_delay=0.0):
                 await rtp.start(call.remote_media)
                 if send is not None:
                     rtp.send(send)
-                await asyncio.sleep(listen)
+                if during is None:
+                    await asyncio.sleep(listen)
+                else:
+                    await asyncio.gather(asyncio.sleep(listen), during(call, rtp))
             finally:
                 await call.hangup()
         finally:
@@ -136,6 +149,72 @@ def test_recording_of_an_echo_call_lines_up_on_one_clock(tmp_path):
     # dry for a slot, which spreads the tone over more frames. Every frame
     # still comes back, so compare energy instead of counting frames.
     energy = np.sum(agent.astype(np.float64) ** 2) / np.sum(caller.astype(np.float64) ** 2)
+    assert 0.9 < energy < 1.1
+
+
+class RawSip(asyncio.DatagramProtocol):
+    def __init__(self):
+        self.received = []
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        self.received.append(parse_message(data))
+
+    def finals(self):
+        return [m for m in self.received if isinstance(m, Response) and m.status >= 200]
+
+
+def test_reinvite_mid_call_does_not_interrupt_the_echo(tmp_path):
+    tone = generate_tone(440, 2.0)
+    seen = {}
+
+    async def main():
+        agent = await LocalAgent.start(agent_config())
+
+        async def refresh(call, rtp):
+            await asyncio.sleep(0.5)
+            loop = asyncio.get_running_loop()
+            transport, raw = await loop.create_datagram_endpoint(
+                RawSip, local_addr=("127.0.0.1", 0)
+            )
+            try:
+                port = transport.get_extra_info("sockname")[1]
+                dialog = call._dialog
+                reinvite = dialog.make_request("INVITE", via_value("127.0.0.1", port, new_branch()))
+                reinvite.headers.add("Contact", f"<sip:1001@127.0.0.1:{port}>")
+                reinvite.headers.add("Content-Type", "application/sdp")
+                reinvite.body = build_offer(rtp.local).encode()
+                transport.sendto(reinvite.to_bytes(), agent.local_addr)
+                async with asyncio.timeout(3):
+                    while not raw.finals():
+                        await asyncio.sleep(0.005)
+                seen["status"] = raw.finals()[0].status
+                ack = dialog.make_request(
+                    "ACK", via_value("127.0.0.1", port, new_branch()), cseq=reinvite.cseq[0]
+                )
+                transport.sendto(ack.to_bytes(), agent.local_addr)
+            finally:
+                transport.close()
+            seen["up"] = not call.ended and len(agent.calls) == 1
+
+        try:
+            await record_call(agent, tmp_path, send=tone, listen=2.6, during=refresh)
+        finally:
+            await agent.close()
+
+    asyncio.run(main())
+    assert seen == {"status": 200, "up": True}
+    caller, _ = read_wav(tmp_path / "caller.wav")
+    echoed, _ = read_wav(tmp_path / "agent.wav")
+    loud = np.flatnonzero(frame_rms(echoed) > 2000)
+    assert loud[-1] - loud[0] >= 95
+    # The echo may slip a silence frame in when its queue runs dry for a slot
+    # (see test_recording_of_an_echo_call_lines_up_on_one_clock).
+    gaps = (loud[-1] - loud[0] + 1) - len(loud)
+    assert gaps <= 2
+    energy = np.sum(echoed.astype(np.float64) ** 2) / np.sum(caller.astype(np.float64) ** 2)
     assert 0.9 < energy < 1.1
 
 
