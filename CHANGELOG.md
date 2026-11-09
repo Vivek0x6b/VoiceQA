@@ -46,3 +46,4 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `voiceqa agent --answer-delay SECONDS` makes the test agent ring that long before it answers.
 - The test agent honours CANCEL before it answers: 200 to the CANCEL, 487 to the INVITE (resent until its ACK), media closed, no call. A CANCEL after the answer still gets 200 and changes nothing.
 - The test agent no longer starts media when a BYE arrives right after the ACK, before media was started.
+- docs/ARCHITECTURE.md marks M1 as done and names M2 (local STT and TTS) as the current milestone.

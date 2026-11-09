@@ -4,8 +4,9 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 
 ## Current status
 
-- Current milestone: M1 (local SIP call with two-way audio and recording), in progress. All its issues are done.
-- Finished issues: issue 1 (G.711 codec and WAV I/O), issue 2 (RTP sender and receiver with 20 ms pacing), issue 3 (SIP UAC with INVITE, ACK, BYE, digest auth and SDP offer/answer), issue 4 (local test agent), issue 5 (recording both directions on a shared clock), issue 6 (`voiceqa call` and `voiceqa calibrate` commands, plus an end-to-end subprocess test in CI and a README quick start), issue 7 (session refresh, INVITEs without an SDP offer, and CANCEL before the agent answers). The project scaffold, CLI (`version`, `doctor`) and CI were done before that.
+- Current milestone: M2 (local STT and TTS), being planned. No M2 issue has started.
+- M1 (local SIP call with two-way audio and recording) is done. All seven issues are finished and CI passes on Windows, macOS and Linux for Python 3.11 to 3.13. What M1 gives: `voiceqa agent` (a local echo or WAV playback agent), `voiceqa call` (one SIP call with recording of both sides and events.json) and `voiceqa calibrate` (VoiceQA's own round-trip floor). Its limits are listed under known problems below.
+- Finished M1 issues: issue 1 (G.711 codec and WAV I/O), issue 2 (RTP sender and receiver with 20 ms pacing), issue 3 (SIP UAC with INVITE, ACK, BYE, digest auth and SDP offer/answer), issue 4 (local test agent), issue 5 (recording both directions on a shared clock), issue 6 (`voiceqa call` and `voiceqa calibrate` commands, plus an end-to-end subprocess test in CI and a README quick start), issue 7 (session refresh, INVITEs without an SDP offer, and CANCEL before the agent answers). The project scaffold, CLI (`version`, `doctor`) and CI were done before that.
 - M1 issues:
   1. G.711 codec (PCMU/PCMA) and WAV I/O. Done.
   2. RTP sender and receiver with 20 ms pacing. Done.
@@ -14,7 +15,7 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
   5. Recording both directions on a shared clock: caller.wav, agent.wav and a stereo mix, plus events.json with timestamps for INVITE sent, ringing, answered, first RTP in, first RTP out and BYE. Done.
   6. `voiceqa call` and `voiceqa calibrate` commands, an end-to-end subprocess test in CI, and a README quick start. Done.
   7. Session refresh: answer an in-dialog re-INVITE or UPDATE with 200 OK and the current SDP instead of 488. Also handle INVITEs without an SDP offer, which some providers send: put our offer in the 200 OK and take the answer from the ACK. Done, along with CANCEL handling in the test agent and `voiceqa agent --answer-delay`.
-- Next issue: none left in M1. Next step is closing M1 and starting M2 (local STT and TTS).
+- Next issue: M2 issue 1, speech interfaces (text to speech and speech to text) with fake engines for tests. The TTS engine is still open: Piper is GPL-3.0 and many neural TTS stacks need espeak-ng (also GPL-3.0) for phonemes, so the licenses have to be checked first.
 - Known problems:
   - A session refresh (re-INVITE or UPDATE) is answered with 200 and the SDP we sent before, and media keeps running as it was. A re-INVITE that changes the far end's address, port or codec still gets our current SDP, and our media is not re-pointed to the new address. Session timers (RFC 4028) are not supported: a refresh with Session-Expires gets a plain 200.
   - A 200 to a refresh that never gets its ACK is only resent until 64 * T1, then dropped. No BYE is sent, though RFC 3261 says the UAS should send one.
@@ -86,7 +87,7 @@ examples/scenarios/
 
 ## Roadmap
 
-- M1: local SIP call with two-way audio and recording.
+- M1: local SIP call with two-way audio and recording. Done.
 - M2: local STT and TTS.
 - M3: YAML scenario engine.
 - M4: audio QA (latency, turn-taking, audio quality metrics).
