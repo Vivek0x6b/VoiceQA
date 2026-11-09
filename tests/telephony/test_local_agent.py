@@ -14,9 +14,9 @@ from voiceqa.telephony.local.agent import AgentConfig, EchoBuffer, LocalAgent, l
 from voiceqa.telephony.media import FRAME_SAMPLES, SAMPLE_RATE
 from voiceqa.telephony.recording import CallRecorder
 from voiceqa.telephony.rtp import RtpSession
-from voiceqa.telephony.sip import SipConfig, place_call
+from voiceqa.telephony.sip import SipConfig, SipStatusError, place_call
 from voiceqa.telephony.sip.dialog import Dialog, ack_for_2xx, build_invite, via_value
-from voiceqa.telephony.sip.message import Response, new_branch, parse_message
+from voiceqa.telephony.sip.message import Headers, Request, Response, new_branch, parse_message
 from voiceqa.telephony.sip.sdp import build_answer, build_offer, parse_offer
 
 
@@ -277,6 +277,48 @@ def test_echo_works_for_an_invite_without_an_sdp_offer():
             await agent.close()
 
     assert asyncio.run(main()) == 200
+
+
+def test_cancel_during_the_answer_delay_rejects_the_call_with_487():
+    async def main():
+        agent = await LocalAgent.start(agent_config(answer_delay=5.0))
+        loop = asyncio.get_running_loop()
+        transport, raw = await loop.create_datagram_endpoint(RawSip, local_addr=("127.0.0.1", 0))
+        rtp = await RtpSession.open(bind_host="127.0.0.1")
+        events = []
+        try:
+            placing = asyncio.ensure_future(
+                place_call(
+                    caller_config(agent),
+                    "agent",
+                    rtp.local,
+                    on_event=lambda name, **kw: events.append((name, kw)),
+                )
+            )
+            await wait_for(lambda: agent._server._ringing)
+            # The UAC cannot cancel, so a raw peer sends the CANCEL for its INVITE.
+            (ringing,) = agent._server._ringing.values()
+            invite = ringing.invite
+            h = Headers()
+            h.add("Via", invite.headers.get_all("Via")[0])
+            for name in ("From", "To", "Call-ID"):
+                h.add(name, invite.headers.get(name))
+            h.add("CSeq", f"{invite.cseq[0]} CANCEL")
+            transport.sendto(Request("CANCEL", invite.uri, h).to_bytes(), agent.local_addr)
+            with pytest.raises(SipStatusError) as err:
+                async with asyncio.timeout(3):
+                    await placing
+            assert err.value.status == 487
+            assert raw.finals()[0].status == 200
+            assert agent.calls == []
+            return events
+        finally:
+            transport.close()
+            await rtp.close()
+            await agent.close()
+
+    events = asyncio.run(main())
+    assert events[-1] == ("call_rejected", {"status": 487, "reason": "Request Terminated"})
 
 
 def test_play_sends_the_wav_resampled_to_8k(tmp_path):

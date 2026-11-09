@@ -154,7 +154,8 @@ def server_key(request: Request) -> tuple[str, str] | None:
 
 
 class OkRetransmitter:
-    """Resends a 2xx to an INVITE until the ACK arrives (RFC 3261 13.3.1.4).
+    """Resends a final response to an INVITE until the ACK arrives (RFC 3261
+    13.3.1.4 for a 2xx, 17.2.1 for the rest). The server also uses it for a 487.
 
     The interval starts at T1 and doubles up to T2. If no ACK came after
     64 * T1, resending stops and on_timeout is called.

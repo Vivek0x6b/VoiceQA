@@ -47,8 +47,13 @@ def test_agent_help_lists_its_options():
     assert result.exit_code == 0
     # Rich styles the help when it thinks colour is wanted (on CI, for one).
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
-    for option in ("--host", "--port", "--play", "--hangup-after"):
+    for option in ("--host", "--port", "--play", "--hangup-after", "--answer-delay"):
         assert option in plain
+
+
+def test_agent_with_a_negative_answer_delay_fails_with_bad_options():
+    result = runner.invoke(app, ["agent", "--port", "0", "--answer-delay", "-1"])
+    assert result.exit_code == 2
 
 
 def test_call_help_lists_its_options():

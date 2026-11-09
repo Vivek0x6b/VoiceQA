@@ -61,9 +61,14 @@ def agent(
     hangup_after: Annotated[
         float | None, typer.Option(help="Hang up this many seconds after answering.")
     ] = None,
+    answer_delay: Annotated[
+        float, typer.Option(min=0.0, help="Ring this many seconds before answering.")
+    ] = 0.0,
 ) -> None:
     """Run a local test agent that answers calls and echoes or plays a WAV."""
-    config = AgentConfig(host=host, port=port, play=play, hangup_after=hangup_after)
+    config = AgentConfig(
+        host=host, port=port, play=play, hangup_after=hangup_after, answer_delay=answer_delay
+    )
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     try:
         asyncio.run(_serve_agent(config))

@@ -28,6 +28,7 @@ class AgentConfig:
     play: str | os.PathLike | None = None
     hangup_after: float | None = None
     timer_t1: float = 0.5
+    answer_delay: float = 0.0
 
 
 def load_prompt(path: str | os.PathLike) -> np.ndarray:
@@ -83,6 +84,7 @@ class LocalAgent:
             host=config.host,
             port=config.port,
             timer_t1=config.timer_t1,
+            answer_delay=config.answer_delay,
         )
         self._server = await SipServer.open(server_config, self._open_media, self._on_call)
         return self

@@ -1,7 +1,9 @@
 """Answering calls: a minimal SIP UAS over UDP for the local test agent.
 
-Every new INVITE with a usable SDP offer is answered at once with 100, 180
-and 200. An INVITE without an offer gets our offer in the 200 and must bring
+Every new INVITE with a usable SDP offer is answered with 100, 180 and 200,
+the 200 coming after answer_delay seconds (none by default). A CANCEL before
+the 200 gets 200 and the INVITE gets 487, resent until its ACK. An INVITE
+without an offer gets our offer in the 200 and must bring
 the answer in the ACK; if it does not, the call is ended with BYE. The 200 is
 resent until the ACK arrives (RFC 3261 section 13.3.1.4); without an ACK
 after 64 * T1 the call is ended with BYE. Responses go back to
@@ -68,6 +70,8 @@ class ServerConfig:
     timer_t1: float = 0.5
     timer_t2: float = 4.0
     user_agent: str = f"VoiceQA-agent/{__version__}"
+    # Seconds between the 180 and the 200, so a caller can CANCEL while ringing.
+    answer_delay: float = 0.0
 
 
 class ServerCall:
@@ -208,6 +212,15 @@ class ServerCall:
 OnCall = Callable[[ServerCall], Awaitable[None]]
 
 
+@dataclass
+class _Ringing:
+    """A new INVITE that has no final response yet."""
+
+    invite: Request
+    tag: str
+    cancelled: asyncio.Event
+
+
 class SipServer:
     def __init__(self, config: ServerConfig, open_media: OpenMedia, on_call: OnCall) -> None:
         self.config = config
@@ -216,6 +229,10 @@ class SipServer:
         self._transport: UdpTransport | None = None
         self._calls: dict[str, ServerCall] = {}
         self._pending: set[str] = set()
+        # By INVITE server transaction, so a CANCEL can find it.
+        self._ringing: dict[tuple[str, str], _Ringing] = {}
+        # 487 responses waiting for their ACK, by INVITE server transaction.
+        self._rejected: dict[tuple[str, str], OkRetransmitter] = {}
         # Last response per server transaction, to answer retransmissions.
         self._answered: dict[tuple[str, str], Response] = {}
         self._clients: dict[tuple[str, str], NonInviteClientTransaction] = {}
@@ -243,6 +260,9 @@ class SipServer:
         for task in list(self._tasks):
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        for resender in self._rejected.values():
+            resender.stop()
+        self._rejected.clear()
         for tx in list(self._clients.values()):
             tx.close()
         if self._transport is not None:
@@ -352,9 +372,14 @@ class SipServer:
             else:
                 self._reply(req, peer, 481, "Call/Transaction Does Not Exist")
         elif req.method == "CANCEL":
-            # We answer at once, so a CANCEL only ever finds a finished INVITE.
+            # RFC 3261 9.2: the CANCEL shares the INVITE's branch. One for an
+            # INVITE that already has its final response changes nothing.
             invite_key = (key[0], "INVITE") if key else None
-            if invite_key is not None and invite_key in self._answered:
+            ringing = self._ringing.get(invite_key) if invite_key else None
+            if ringing is not None:
+                self._reply(req, peer, 200, "OK", ringing.tag)
+                ringing.cancelled.set()
+            elif invite_key is not None and invite_key in self._answered:
                 self._reply(req, peer, 200, "OK")
             else:
                 self._reply(req, peer, 481, "Call/Transaction Does Not Exist")
@@ -375,6 +400,13 @@ class SipServer:
             call._resend_until_acked(resp, peer)
 
     def _on_ack(self, ack: Request) -> None:
+        # An ACK for a 487 has the INVITE's branch (RFC 3261 17.1.1.3).
+        key = server_key(ack)
+        if key is not None:
+            resender = self._rejected.pop((key[0], "INVITE"), None)
+            if resender is not None:
+                resender.stop()
+                return
         # The ACK to the first 200 carries the answer when the INVITE had no
         # offer. The answer to a refresh offer is not read, the session stays.
         call = self._calls.get(ack.headers.get("Call-ID") or "")
@@ -393,20 +425,26 @@ class SipServer:
                 return
         call_id = invite.headers.get("Call-ID") or ""
         self._pending.add(call_id)
+        ringing = _Ringing(invite, new_tag(), asyncio.Event())
+        key = server_key(invite)
+        if key is not None:
+            self._ringing[key] = ringing
         self._reply(invite, peer, 100, "Trying")
-        self._spawn(self._answer_call(invite, peer, remote))
+        self._spawn(self._answer_call(ringing, peer, remote))
 
     async def _answer_call(
-        self, invite: Request, peer: Address, remote: RemoteMedia | None
+        self, ringing: _Ringing, peer: Address, remote: RemoteMedia | None
     ) -> None:
         """Answer a new INVITE. Without an offer in it, ours goes in the 200 and
         the answer comes in the ACK; media starts once the answer is known."""
+        invite, tag = ringing.invite, ringing.tag
         call_id = invite.headers.get("Call-ID") or ""
-        tag = new_tag()
+        # Media we opened and must close ourselves, until a call takes it over.
+        unowned: MediaSession | None = None
         try:
             host = self._host_for(peer)
             try:
-                media = await self._open_media(host)
+                media = unowned = await self._open_media(host)
             except Exception:
                 log.exception("could not open media for call %s", call_id)
                 self._reply(invite, peer, 500, "Server Internal Error", tag)
@@ -418,10 +456,17 @@ class SipServer:
                     local_sdp = build_answer(media.local, remote.payload_type)
                 except ValueError:
                     log.exception("media for call %s cannot do the offered codec", call_id)
-                    await media.close()
                     self._reply(invite, peer, 500, "Server Internal Error", tag)
                     return
-            self._reply(invite, peer, 180, "Ringing", tag)
+            if not ringing.cancelled.is_set():
+                self._reply(invite, peer, 180, "Ringing", tag)
+                if self.config.answer_delay > 0:
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(ringing.cancelled.wait(), self.config.answer_delay)
+            if ringing.cancelled.is_set():
+                self._reject_cancelled(invite, peer, tag)
+                return
+            # No await from here on, so a CANCEL cannot slip in before the 200.
             dialog = Dialog.from_invite(invite, tag)
             contact = f"<sip:{self.config.user}@{host}:{self.local_addr[1]}>"
             call = ServerCall(self, invite, peer, dialog, media, remote, local_sdp, contact)
@@ -435,13 +480,19 @@ class SipServer:
             ok.headers.add("Content-Type", "application/sdp")
             ok.body = local_sdp.encode()
             self._calls[call_id] = call
+            unowned = None
         finally:
             self._pending.discard(call_id)
+            if key := server_key(invite):
+                self._ringing.pop(key, None)
+            if unowned is not None:
+                await unowned.close()
         self._answer(invite, peer, ok)
         call._start_resending(ok)
         remote = await call._remote
-        if remote is None:
-            # The ACK had no usable answer, or the call ended before it came.
+        if remote is None or call.ended:
+            # The ACK had no usable answer, or the call ended before media
+            # started (a BYE can land between the ACK and this task waking).
             if not call.ended:
                 await call.hangup()
             return
@@ -450,6 +501,23 @@ class SipServer:
         await media.start(remote)
         if not call.ended:
             call.task = self._spawn(self._run_call(call))
+
+    def _reject_cancelled(self, invite: Request, peer: Address, tag: str) -> None:
+        log.info("call %s cancelled before it was answered", invite.headers.get("Call-ID"))
+        resp = self._reply(invite, peer, 487, "Request Terminated", tag)
+        key = server_key(invite)
+        if key is None:
+            return
+        # RFC 3261 17.2.1: resend on timer G until the ACK, give up on timer H.
+        cfg = self.config
+        resender = OkRetransmitter(
+            lambda: self._transport_send(resp, peer),
+            cfg.timer_t1,
+            cfg.timer_t2,
+            lambda: self._rejected.pop(key, None),
+        )
+        self._rejected[key] = resender
+        resender.start()
 
     async def _run_call(self, call: ServerCall) -> None:
         try:

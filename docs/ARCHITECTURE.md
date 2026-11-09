@@ -4,8 +4,8 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 
 ## Current status
 
-- Current milestone: M1 (local SIP call with two-way audio and recording), in progress.
-- Finished issues: issue 1 (G.711 codec and WAV I/O), issue 2 (RTP sender and receiver with 20 ms pacing), issue 3 (SIP UAC with INVITE, ACK, BYE, digest auth and SDP offer/answer), issue 4 (local test agent), issue 5 (recording both directions on a shared clock), issue 6 (`voiceqa call` and `voiceqa calibrate` commands, plus an end-to-end subprocess test in CI and a README quick start). The project scaffold, CLI (`version`, `doctor`) and CI were done before that.
+- Current milestone: M1 (local SIP call with two-way audio and recording), in progress. All its issues are done.
+- Finished issues: issue 1 (G.711 codec and WAV I/O), issue 2 (RTP sender and receiver with 20 ms pacing), issue 3 (SIP UAC with INVITE, ACK, BYE, digest auth and SDP offer/answer), issue 4 (local test agent), issue 5 (recording both directions on a shared clock), issue 6 (`voiceqa call` and `voiceqa calibrate` commands, plus an end-to-end subprocess test in CI and a README quick start), issue 7 (session refresh, INVITEs without an SDP offer, and CANCEL before the agent answers). The project scaffold, CLI (`version`, `doctor`) and CI were done before that.
 - M1 issues:
   1. G.711 codec (PCMU/PCMA) and WAV I/O. Done.
   2. RTP sender and receiver with 20 ms pacing. Done.
@@ -13,12 +13,14 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
   4. Local test agent: a SIP UAS that answers calls and either echoes the caller's audio or plays a WAV file. Done.
   5. Recording both directions on a shared clock: caller.wav, agent.wav and a stereo mix, plus events.json with timestamps for INVITE sent, ringing, answered, first RTP in, first RTP out and BYE. Done.
   6. `voiceqa call` and `voiceqa calibrate` commands, an end-to-end subprocess test in CI, and a README quick start. Done.
-  7. Session refresh: answer an in-dialog re-INVITE or UPDATE with 200 OK and the current SDP instead of 488. Also handle INVITEs without an SDP offer, which some providers send: put our offer in the 200 OK and take the answer from the ACK.
-- Next issue: issue 7 (session refresh and INVITEs without an SDP offer).
+  7. Session refresh: answer an in-dialog re-INVITE or UPDATE with 200 OK and the current SDP instead of 488. Also handle INVITEs without an SDP offer, which some providers send: put our offer in the 200 OK and take the answer from the ACK. Done, along with CANCEL handling in the test agent and `voiceqa agent --answer-delay`.
+- Next issue: none left in M1. Next step is closing M1 and starting M2 (local STT and TTS).
 - Known problems:
-  - A session refresh (re-INVITE or UPDATE) is answered with 200 and the SDP we sent before, and media keeps running as it was. If the offer moves the far end's media to a new address, port or codec, we do not follow it. Session timers (RFC 4028) are not supported: a refresh with Session-Expires gets a plain 200.
-  - The test agent sends its in-dialog requests (BYE) to the address the INVITE came from, not along the Route set, so it does not work behind a proxy that needs Record-Route followed. It answers at once, so CANCEL never stops a call. The agent takes INVITEs without an SDP offer (our offer goes in the 200, the answer comes in the ACK).
-  - SIP is UDP and IPv4 only, MD5 digest only, no REGISTER or CANCEL, no NAT rewrite of Contact from `received`/`rport`.
+  - A session refresh (re-INVITE or UPDATE) is answered with 200 and the SDP we sent before, and media keeps running as it was. A re-INVITE that changes the far end's address, port or codec still gets our current SDP, and our media is not re-pointed to the new address. Session timers (RFC 4028) are not supported: a refresh with Session-Expires gets a plain 200.
+  - A 200 to a refresh that never gets its ACK is only resent until 64 * T1, then dropped. No BYE is sent, though RFC 3261 says the UAS should send one.
+  - The test agent treats an INVITE with a multipart body (for example SDP plus ISUP) as an INVITE without an offer. It puts its own offer in the 200 and expects the answer in the ACK.
+  - The test agent sends its in-dialog requests (BYE) to the address the INVITE came from, not along the Route set, so it does not work behind a proxy that needs Record-Route followed.
+  - SIP is UDP and IPv4 only, MD5 digest only, no REGISTER, no NAT rewrite of Contact from `received`/`rport`. The UAC cannot send CANCEL.
   - RTP has no RTCP, no DTMF and no symmetric RTP source check.
   - If the far end's RTP timestamps jump backwards and stay there, up to 0.5 s of its audio is placed at arrival time and may be dropped as overlapping before the stream is anchored again. Our own event loop stalling for more than 0.5 s has the same effect on the audio queued in the socket during the stall.
   - On Windows the Proactor loop does not call `connection_lost` when a UDP transport closes with a send in flight. The SIP transport works around it with `abort()` after two yields.
@@ -38,6 +40,8 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 - RTP pacing uses absolute deadlines (packet n is due at t0 + n * 20 ms). Up to 5 late frames are sent back to back. When the loop is blocked for longer, missed slots are skipped and the RTP timestamp jumps forward, so the far end hears a gap of the right length instead of a burst.
 - SIP sends every request to the configured server, used as an outbound proxy. A 2xx with unusable SDP is ACKed and then ended with BYE before the error is raised.
 - The SIP UAS (`sip/uas.py`) gets media from a callback that returns a `MediaSession`, so it does not import RTP either. The test agent (`telephony/local/agent.py`) wires it to `RtpSession`. The UAS does not send BYE before the ACK arrives or the ACK wait (64 * T1) runs out, since the caller may not know the dialog yet.
+- A new INVITE goes through one answer path in the UAS: open media, build our SDP (an answer to the offer, or our own offer when the INVITE has none), send 180, wait `answer_delay` seconds (0 by default), send 200. A CANCEL that matches the INVITE's branch before the 200 gets 200, and the INVITE gets 487, resent on timer G until its ACK or 64 * T1. The media is closed and no call is created. A CANCEL after the 200 gets 200 and nothing else (RFC 3261 9.2). Without an offer in the INVITE, media starts only when the ACK brings a usable answer, and not at all if the call ended first.
+- Session refreshes (in-dialog re-INVITE or UPDATE) get 200 with the SDP we sent last, with the same o= version (RFC 6337). Media is never closed, restarted or re-pointed by a refresh. Only an offer with no codec in common gets 488, and the call stays up.
 - Echo in the test agent does constant work per frame: `RtpSession.listen()` hands each new decoded frame to a bounded buffer (1 s, oldest dropped when full), which is flushed to `send()` every 20 ms.
 - Media timing and call events use one clock, `media_clock` (`time.perf_counter`). Not `loop.time()`, which ticks in 15.6 ms steps on Windows before Python 3.13. The RTP sender's deadlines run on it too, so a sent frame's time is its exact slot.
 - `RtpSession` keeps no audio. `record(sink)` hands every frame sent and received to a `MediaSink` with its time on `media_clock`. Sent frames are timed by their slot deadline. Received frames are placed by RTP timestamp, anchored at the first packet's arrival (`rtp/timeline.py`), so jitter and reordering do not move audio. A packet more than 0.5 s late or 0.1 s early against that anchor is placed at its arrival time instead. Only when that lasts 0.5 s is the stream anchored again, so a burst after a stall does not shift the rest of the call. Duplicates are found in a 64-packet history.

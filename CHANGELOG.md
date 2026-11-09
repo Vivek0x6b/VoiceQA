@@ -43,3 +43,6 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Our INVITE, our 200 to an INVITE, and refresh responses carry `Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, UPDATE`.
 - The UAC answers resent requests from the far end with the same response instead of handling them again.
 - The test agent accepts an INVITE without an SDP offer instead of sending 488. It puts its offer in the 200, takes the answer from the ACK, and only then starts media. An ACK without a usable answer ends the call with BYE.
+- `voiceqa agent --answer-delay SECONDS` makes the test agent ring that long before it answers.
+- The test agent honours CANCEL before it answers: 200 to the CANCEL, 487 to the INVITE (resent until its ACK), media closed, no call. A CANCEL after the answer still gets 200 and changes nothing.
+- The test agent no longer starts media when a BYE arrives right after the ACK, before media was started.

@@ -15,6 +15,7 @@ from voiceqa.telephony.sip.message import (
     parse_name_addr,
 )
 from voiceqa.telephony.sip.sdp import build_answer, build_offer, parse_answer, parse_offer
+from voiceqa.telephony.sip.transaction import ack_for_failure
 from voiceqa.telephony.sip.uas import ServerConfig, SipServer
 
 CALLER_MEDIA = LocalMedia(host="127.0.0.1", port=40000)
@@ -555,6 +556,165 @@ def test_cancel_after_answer_gets_200_and_the_call_stays_up():
         ok = peer.responses("INVITE", 200)[0]
         send(peer, server, in_dialog(peer, ok, "ACK", 1))
         assert len(server.calls) == 1
+        peer.transport.close()
+
+    run(scenario)
+
+
+def cancel_for(invite):
+    # RFC 3261 9.1: same Request-URI, top Via, From, To, Call-ID and CSeq number.
+    h = Headers()
+    h.add("Via", invite.headers.get_all("Via")[0])
+    h.add("Max-Forwards", "70")
+    for name in ("From", "To", "Call-ID"):
+        h.add(name, invite.headers.get(name))
+    h.add("CSeq", f"{invite.cseq[0]} CANCEL")
+    return Request("CANCEL", invite.uri, h)
+
+
+def offer_or_offerless(peer, server, offerless):
+    return offerless_invite(peer, server) if offerless else raw_invite(peer, server)
+
+
+@pytest.mark.parametrize("offerless", [False, True])
+def test_answer_delay_holds_the_200_back(offerless):
+    delay = 0.3
+
+    async def scenario(server, agent):
+        loop = asyncio.get_running_loop()
+        peer = await raw_peer()
+        sent = loop.time()
+        send(peer, server, offer_or_offerless(peer, server, offerless))
+        await until(lambda: peer.responses("INVITE", 180))
+        assert not peer.responses("INVITE", 200)
+        await until(lambda: peer.responses("INVITE", 200))
+        # asyncio may fire a timer up to one clock tick early (about 16 ms on Windows).
+        assert loop.time() - sent >= delay - 0.05
+        assert [r.status for r in peer.responses("INVITE")][:3] == [100, 180, 200]
+        ok = peer.responses("INVITE", 200)[0]
+        ack = in_dialog(peer, ok, "ACK", 1)
+        if offerless:
+            ack = with_sdp(ack, build_answer(CALLER_MEDIA, PayloadType.PCMU))
+        send(peer, server, ack)
+        await until(lambda: agent.calls)
+        await hang_up_raw(peer, server, ok, 2)
+
+    run(scenario, answer_delay=delay)
+
+
+async def ringing_raw_call(server, offerless=False):
+    peer = await raw_peer()
+    invite = offer_or_offerless(peer, server, offerless)
+    send(peer, server, invite)
+    await until(lambda: peer.responses("INVITE", 180))
+    return peer, invite
+
+
+@pytest.mark.parametrize("offerless", [False, True])
+def test_cancel_while_ringing_gets_200_and_487_and_no_call(offerless):
+    async def scenario(server, agent):
+        peer, invite = await ringing_raw_call(server, offerless)
+        send(peer, server, cancel_for(invite))
+        await until(lambda: peer.responses("INVITE", 487))
+        (cancel_ok,) = peer.responses("CANCEL")
+        assert cancel_ok.status == 200
+        ringing = peer.responses("INVITE", 180)[0]
+        rejected = peer.responses("INVITE", 487)[0]
+        assert cancel_ok.headers.get("To") == ringing.headers.get("To")
+        assert rejected.headers.get("To") == ringing.headers.get("To")
+        (media,) = agent.media
+        await until(lambda: media.closed)
+        assert media.starts == 0
+        assert not peer.responses("INVITE", 200)
+        assert agent.calls == []
+        assert server.calls == []
+        send(peer, server, ack_for_failure(invite, rejected))
+        peer.transport.close()
+
+    run(scenario, answer_delay=5.0)
+
+
+def test_487_is_resent_until_its_ack_arrives():
+    async def scenario(server, agent):
+        peer, invite = await ringing_raw_call(server)
+        send(peer, server, cancel_for(invite))
+        await until(lambda: len(peer.responses("INVITE", 487)) >= 3)
+        rejected = peer.responses("INVITE", 487)[0]
+        assert all(r.to_bytes() == rejected.to_bytes() for r in peer.responses("INVITE", 487))
+        send(peer, server, ack_for_failure(invite, rejected))
+        await asyncio.sleep(0.05)
+        count = len(peer.responses("INVITE", 487))
+        await asyncio.sleep(0.4)  # well past the T2 cap of 0.16 s
+        assert len(peer.responses("INVITE", 487)) == count
+        peer.transport.close()
+
+    run(scenario, answer_delay=5.0)
+
+
+def test_487_resending_stops_after_64_t1_without_an_ack():
+    async def scenario(server, agent):
+        peer, invite = await ringing_raw_call(server)
+        send(peer, server, cancel_for(invite))
+        await until(lambda: peer.responses("INVITE", 487))
+        await asyncio.sleep(64 * T1 + 0.3)
+        count = len(peer.responses("INVITE", 487))
+        await asyncio.sleep(0.4)
+        assert len(peer.responses("INVITE", 487)) == count
+        peer.transport.close()
+
+    run(scenario, answer_delay=5.0)
+
+
+def test_cancel_after_a_delayed_answer_gets_200_and_the_call_goes_on():
+    async def scenario(server, agent):
+        peer, invite = await ringing_raw_call(server)
+        await until(lambda: peer.responses("INVITE", 200))
+        ok = peer.responses("INVITE", 200)[0]
+        send(peer, server, in_dialog(peer, ok, "ACK", 1))
+        await until(lambda: agent.calls)
+        send(peer, server, cancel_for(invite))
+        await until(lambda: peer.responses("CANCEL"))
+        assert peer.responses("CANCEL")[0].status == 200
+        await asyncio.sleep(0.1)
+        assert not peer.responses("INVITE", 487)
+        assert_media_untouched(agent, agent.calls[0])
+        await hang_up_raw(peer, server, ok, 2)
+
+    run(scenario, answer_delay=0.1)
+
+
+def test_close_while_ringing_closes_the_media():
+    async def main():
+        agent = Agent()
+        server = await SipServer.open(
+            server_config(answer_delay=5.0), agent.open_media, agent.on_call
+        )
+        peer, _ = await ringing_raw_call(server)
+        await server.close()
+        assert agent.media[0].closed
+        assert agent.calls == []
+        peer.transport.close()
+
+    asyncio.run(main())
+
+
+def test_bye_right_after_the_ack_does_not_start_media():
+    async def scenario(server, agent):
+        peer = await raw_peer()
+        send(peer, server, offerless_invite(peer, server))
+        await until(lambda: peer.responses("INVITE", 200))
+        ok = peer.responses("INVITE", 200)[0]
+        ack = with_sdp(in_dialog(peer, ok, "ACK", 1), build_answer(CALLER_MEDIA, PayloadType.PCMU))
+        bye = in_dialog(peer, ok, "BYE", 2)
+        # Both land before the answering task wakes up for the ACK's answer.
+        addr = ("127.0.0.1", peer.port)
+        server._on_message(ack, addr)
+        server._on_message(bye, addr)
+        (media,) = agent.media
+        await until(lambda: media.closed)
+        await asyncio.sleep(0.05)
+        assert media.starts == 0
+        assert agent.calls == []
         peer.transport.close()
 
     run(scenario)
