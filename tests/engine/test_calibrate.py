@@ -23,6 +23,9 @@ def test_run_calibration_against_the_local_echo_agent_writes_calibration_json(tm
     # onsets, so it must match exactly, not just be "enough".
     assert result.pulses_sent == pulse_count(seconds)
     assert result.answered is True
+    # Same status run_call reports for an answered call: used to build the
+    # same "answered/no (status reason)" summary line as voiceqa call.
+    assert result.status == 200
     # Generous bound: a local loopback round trip should be nowhere near 1 s.
     assert result.pulses_matched >= 1
     assert result.median_ms is not None

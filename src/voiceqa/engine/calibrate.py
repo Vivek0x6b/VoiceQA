@@ -80,6 +80,7 @@ class CalibrationResult:
     pulses_sent: int
     pulses_matched: int
     answered: bool
+    status: int | None
     reason: str | None
     record_dir: Path
 
@@ -134,6 +135,7 @@ async def run_calibration(record_dir: str | Path, seconds: float = 10.0) -> Cali
         pulses_sent=pulse_count(seconds),
         pulses_matched=timing.pulses_matched,
         answered=call_result.answered,
+        status=call_result.status,
         reason=call_result.reason,
         record_dir=record_dir,
     )

@@ -71,6 +71,17 @@ def test_call_with_a_non_numeric_server_port_fails_with_bad_options():
     assert "abc" in result.output
 
 
+def test_call_with_a_non_positive_duration_fails_with_bad_options():
+    result = runner.invoke(app, ["call", "agent", "--server", "127.0.0.1", "--duration", "0"])
+    assert result.exit_code == 2
+
+
+def test_call_with_an_at_sign_in_a_bare_target_fails_with_bad_options():
+    result = runner.invoke(app, ["call", "agent@127.0.0.1", "--server", "127.0.0.1"])
+    assert result.exit_code == 2
+    assert "@" in result.output
+
+
 def test_call_interrupted_prints_the_recording_folder(tmp_path, monkeypatch):
     import voiceqa.cli.main as main
 
@@ -84,6 +95,11 @@ def test_call_interrupted_prints_the_recording_folder(tmp_path, monkeypatch):
     assert str(tmp_path) in result.output
 
 
+def test_calibrate_with_a_non_positive_seconds_fails_with_bad_options():
+    result = runner.invoke(app, ["calibrate", "--seconds", "-1"])
+    assert result.exit_code == 2
+
+
 def test_calibrate_help_lists_its_options():
     result = runner.invoke(app, ["calibrate", "--help"])
     assert result.exit_code == 0
@@ -92,7 +108,7 @@ def test_calibrate_help_lists_its_options():
         assert option in plain
 
 
-def _fake_calibration(pulses_sent, pulses_matched, answered=True, reason="OK"):
+def _fake_calibration(pulses_sent, pulses_matched, answered=True, status=200, reason="OK"):
     async def run(record_dir, seconds=10.0):
         return CalibrationResult(
             created_at="2026-01-01T00:00:00.000Z",
@@ -104,6 +120,7 @@ def _fake_calibration(pulses_sent, pulses_matched, answered=True, reason="OK"):
             pulses_sent=pulses_sent,
             pulses_matched=pulses_matched,
             answered=answered,
+            status=status,
             reason=reason,
             record_dir=Path(record_dir),
         )
@@ -130,8 +147,10 @@ def test_calibrate_exits_0_when_half_or_more_pulses_matched(monkeypatch):
 def test_calibrate_prints_the_reason_when_the_call_was_not_answered(monkeypatch):
     import voiceqa.cli.main as main
 
+    # status and reason in the shape run_call actually returns them (a
+    # numeric status and a short reason text, not one combined string).
     fake = _fake_calibration(
-        pulses_sent=0, pulses_matched=0, answered=False, reason="486 Busy Here"
+        pulses_sent=0, pulses_matched=0, answered=False, status=486, reason="Busy Here"
     )
     monkeypatch.setattr(main, "run_calibration", fake)
     result = runner.invoke(app, ["calibrate"])

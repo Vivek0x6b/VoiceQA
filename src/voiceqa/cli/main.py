@@ -104,8 +104,21 @@ def _target_host_port(target: str) -> tuple[str, int] | None:
     return host, int(port) if port else DEFAULT_SIP_PORT
 
 
+def _positive(value: float) -> float:
+    if value <= 0:
+        raise typer.BadParameter("must be greater than 0")
+    return value
+
+
 def _line(label: str, value: str) -> None:
     typer.echo(f"{label:<14}{value}")
+
+
+def _not_answered_detail(status: int | None, reason: str | None) -> str:
+    """ "status reason", or just reason if there is no status (for example a
+    resolve failure). Shared by voiceqa call and voiceqa calibrate, which
+    both get these from a CallResult."""
+    return f"{status} {reason}" if status else (reason or "")
 
 
 def _print_summary(result: CallResult) -> None:
@@ -119,8 +132,7 @@ def _print_summary(result: CallResult) -> None:
         else:
             _line("first audio", f"{result.first_audio_latency:.3f} s after answer")
     else:
-        detail = f"{result.status} {result.reason}" if result.status else result.reason
-        _line("answered", f"no ({detail})")
+        _line("answered", f"no ({_not_answered_detail(result.status, result.reason)})")
     _line("recording", str(result.record_dir))
 
 
@@ -143,7 +155,8 @@ def call(
         typer.Option("--record-dir", help="Where to write the recording. Default: runs/<time>."),
     ] = None,
     duration: Annotated[
-        float, typer.Option(help="Hang up this many seconds after the answer.")
+        float,
+        typer.Option(help="Hang up this many seconds after the answer.", callback=_positive),
     ] = 10.0,
     codec: Annotated[Codec, typer.Option(help="Payload type to offer.")] = Codec.pcmu,
 ) -> None:
@@ -153,6 +166,14 @@ def call(
     VOICEQA_SIP_PASSWORD environment variable, never from a command line
     option, so it never ends up in shell history.
     """
+    if "@" in target and not target.startswith(("sip:", "sips:")):
+        typer.echo(
+            "error: TARGET must not contain '@' unless it is a full sip: URI "
+            "(use TARGET without '@' together with --server)",
+            err=True,
+        )
+        raise typer.Exit(2)
+
     if server is not None:
         try:
             server_host, server_port = _split_host_port(server, DEFAULT_SIP_PORT)
@@ -204,7 +225,7 @@ def call(
 
 def _print_calibration_summary(result: CalibrationResult) -> None:
     if not result.answered:
-        _line("call", f"no ({result.reason})" if result.reason else "no")
+        _line("call", f"no ({_not_answered_detail(result.status, result.reason)})")
     _line("median", f"{result.median_ms:.1f} ms" if result.median_ms is not None else "none")
     _line("p95", f"{result.p95_ms:.1f} ms" if result.p95_ms is not None else "none")
     _line("matched", f"{result.pulses_matched}/{result.pulses_sent}")
@@ -213,7 +234,9 @@ def _print_calibration_summary(result: CalibrationResult) -> None:
 
 @app.command()
 def calibrate(
-    seconds: Annotated[float, typer.Option(help="How long to send test pulses for.")] = 10.0,
+    seconds: Annotated[
+        float, typer.Option(help="How long to send test pulses for.", callback=_positive)
+    ] = 10.0,
     record_dir: Annotated[
         Path | None,
         typer.Option(

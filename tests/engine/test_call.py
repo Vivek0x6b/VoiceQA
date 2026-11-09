@@ -200,7 +200,21 @@ def test_call_with_unresolvable_server_is_reported_not_answered(tmp_path, monkey
     assert (tmp_path / "events.json").exists()
 
 
-def test_codec_option_offers_only_that_payload_type(tmp_path):
+def test_codec_option_offers_only_that_payload_type(tmp_path, monkeypatch):
+    # The agent supports both PCMU and PCMA and, per parse_offer, picks the
+    # first payload type in our offer that it also supports. If our offer
+    # listed both (the default order is PCMU first), it would pick PCMU
+    # regardless of --codec, so seeing PCMA here proves PCMA is the only
+    # thing we offered.
+    negotiated = []
+    original_on_call = LocalAgent._on_call
+
+    async def spying_on_call(self, call):
+        negotiated.append(call.remote_media.payload_type)
+        await original_on_call(self, call)
+
+    monkeypatch.setattr(LocalAgent, "_on_call", spying_on_call)
+
     async def main():
         agent = await start_agent()
         try:
@@ -220,3 +234,4 @@ def test_codec_option_offers_only_that_payload_type(tmp_path):
 
     result = asyncio.run(main())
     assert result.answered
+    assert negotiated == [PayloadType.PCMA]
