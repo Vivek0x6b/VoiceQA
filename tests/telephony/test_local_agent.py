@@ -15,9 +15,9 @@ from voiceqa.telephony.media import FRAME_SAMPLES, SAMPLE_RATE
 from voiceqa.telephony.recording import CallRecorder
 from voiceqa.telephony.rtp import RtpSession
 from voiceqa.telephony.sip import SipConfig, place_call
-from voiceqa.telephony.sip.dialog import via_value
+from voiceqa.telephony.sip.dialog import Dialog, ack_for_2xx, build_invite, via_value
 from voiceqa.telephony.sip.message import Response, new_branch, parse_message
-from voiceqa.telephony.sip.sdp import build_offer
+from voiceqa.telephony.sip.sdp import build_answer, build_offer, parse_offer
 
 
 def caller_config(agent):
@@ -216,6 +216,67 @@ def test_reinvite_mid_call_does_not_interrupt_the_echo(tmp_path):
     assert gaps <= 2
     energy = np.sum(echoed.astype(np.float64) ** 2) / np.sum(caller.astype(np.float64) ** 2)
     assert 0.9 < energy < 1.1
+
+
+async def wait_for(cond, timeout=5.0):
+    async with asyncio.timeout(timeout):
+        while not cond():
+            await asyncio.sleep(0.005)
+
+
+def test_echo_works_for_an_invite_without_an_sdp_offer():
+    tone = generate_tone(440, 0.5)
+
+    async def main():
+        agent = await LocalAgent.start(agent_config())
+        loop = asyncio.get_running_loop()
+        transport, raw = await loop.create_datagram_endpoint(RawSip, local_addr=("127.0.0.1", 0))
+        rtp = await RtpSession.open(bind_host="127.0.0.1")
+        heard = []
+        rtp.listen(heard.append)
+
+        def bye_answers():
+            return [m for m in raw.finals() if m.cseq[1] == "BYE"]
+
+        try:
+            port = transport.get_extra_info("sockname")[1]
+            invite = build_invite(
+                target_uri=f"sip:agent@127.0.0.1:{agent.local_addr[1]}",
+                from_uri="sip:1001@127.0.0.1",
+                from_tag="rawtag",
+                display_name=None,
+                call_id="offerless",
+                cseq=1,
+                contact_uri=f"sip:1001@127.0.0.1:{port}",
+                via=via_value("127.0.0.1", port, new_branch()),
+                sdp="",
+                user_agent="raw",
+            )
+            invite.headers.remove("Content-Type")
+            transport.sendto(invite.to_bytes(), agent.local_addr)
+            await wait_for(raw.finals)
+            ok = raw.finals()[0]
+            assert ok.status == 200
+            remote = parse_offer(ok.body, rtp.local.payload_types)
+            dialog = Dialog.from_response(invite, ok)
+            ack = ack_for_2xx(dialog, invite, via_value("127.0.0.1", port, new_branch()))
+            ack.headers.add("Content-Type", "application/sdp")
+            ack.body = build_answer(rtp.local, remote.payload_type).encode()
+            transport.sendto(ack.to_bytes(), agent.local_addr)
+            await rtp.start(remote)
+            rtp.send(tone)
+            # Half a second of tone is 25 frames.
+            await wait_for(lambda: sum(frame_rms(f)[0] > 2000 for f in heard) >= 20)
+            bye = dialog.make_request("BYE", via_value("127.0.0.1", port, new_branch()))
+            transport.sendto(bye.to_bytes(), agent.local_addr)
+            await wait_for(lambda: bye_answers() and agent.calls == [])
+            return bye_answers()[0].status
+        finally:
+            transport.close()
+            await rtp.close()
+            await agent.close()
+
+    assert asyncio.run(main()) == 200
 
 
 def test_play_sends_the_wav_resampled_to_8k(tmp_path):

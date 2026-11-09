@@ -1,8 +1,10 @@
 """Answering calls: a minimal SIP UAS over UDP for the local test agent.
 
 Every new INVITE with a usable SDP offer is answered at once with 100, 180
-and 200. The 200 is resent until the ACK arrives (RFC 3261 section 13.3.1.4);
-without an ACK after 64 * T1 the call is ended with BYE. Responses go back to
+and 200. An INVITE without an offer gets our offer in the 200 and must bring
+the answer in the ACK; if it does not, the call is ended with BYE. The 200 is
+resent until the ACK arrives (RFC 3261 section 13.3.1.4); without an ACK
+after 64 * T1 the call is ended with BYE. Responses go back to
 the source address of the request (RFC 3581), and requests we start inside a
 dialog (BYE) go to the address the INVITE came from, so the agent works
 behind the caller's NAT but not through a proxy that expects its Route set
@@ -34,7 +36,7 @@ from voiceqa.telephony.sip.message import (
     parse_name_addr,
     parse_via,
 )
-from voiceqa.telephony.sip.sdp import build_answer, parse_offer
+from voiceqa.telephony.sip.sdp import build_answer, build_offer, parse_answer, parse_offer
 from voiceqa.telephony.sip.transaction import (
     NonInviteClientTransaction,
     OkRetransmitter,
@@ -47,6 +49,14 @@ log = logging.getLogger(__name__)
 _WILDCARDS = {"", "0.0.0.0"}
 
 OpenMedia = Callable[[str], Awaitable[MediaSession]]
+
+
+def sdp_body(msg: Request) -> bytes:
+    """The body if it is SDP, else empty. A body without Content-Type counts as SDP."""
+    kind = msg.headers.get("Content-Type") or "application/sdp"
+    if kind.split(";")[0].strip().lower() != "application/sdp":
+        return b""
+    return msg.body
 
 
 @dataclass(frozen=True)
@@ -70,14 +80,20 @@ class ServerCall:
         peer: Address,
         dialog: Dialog,
         media: MediaSession,
-        remote_media: RemoteMedia,
+        remote_media: RemoteMedia | None,
         local_sdp: str,
         contact: str,
     ) -> None:
         self.call_id = dialog.call_id
         self.peer = peer
         self.media = media
+        # None until the ACK brings the answer when the INVITE had no offer.
         self.remote_media = remote_media
+        self._remote: asyncio.Future[RemoteMedia | None] = (
+            asyncio.get_running_loop().create_future()
+        )
+        if remote_media is not None:
+            self._remote.set_result(remote_media)
         self.invite = invite
         self.dialog = dialog
         # The SDP we sent last in this dialog. Session refreshes get it again.
@@ -140,12 +156,22 @@ class ServerCall:
         self._resending[seq] = resender
         resender.start()
 
-    def _acked(self, seq: int) -> None:
+    def _acked(self, ack: Request) -> None:
+        seq = ack.cseq[0]
         resender = self._resending.pop(seq, None)
         if resender is not None:
             resender.stop()
         if seq == self.invite.cseq[0]:
             self._confirmed.set()
+            if not self._remote.done():
+                self._remote.set_result(self._read_answer(ack))
+
+    def _read_answer(self, ack: Request) -> RemoteMedia | None:
+        try:
+            return parse_answer(sdp_body(ack), self.media.local.payload_types)
+        except SdpError as exc:
+            log.info("no usable answer in the ACK for call %s: %s", self.call_id, exc)
+            return None
 
     def _confirm(self) -> None:
         self._confirmed.set()
@@ -158,6 +184,8 @@ class ServerCall:
             return
         self._ended.set()
         self._confirm()
+        if not self._remote.done():
+            self._remote.set_result(None)
         log.info("call %s ended", self.call_id)
         self._server._forget(self)
         # The handler may be the one hanging up; then it is neither cancelled
@@ -347,25 +375,32 @@ class SipServer:
             call._resend_until_acked(resp, peer)
 
     def _on_ack(self, ack: Request) -> None:
-        # An ACK may carry the answer to the offer in a refresh 200. We keep
-        # the session as it is, so the answer is not read.
+        # The ACK to the first 200 carries the answer when the INVITE had no
+        # offer. The answer to a refresh offer is not read, the session stays.
         call = self._calls.get(ack.headers.get("Call-ID") or "")
         if call is not None and call.dialog.matches(ack):
-            call._acked(ack.cseq[0])
+            call._acked(ack)
 
     def _on_invite(self, invite: Request, peer: Address) -> None:
-        try:
-            remote = parse_offer(invite.body, self.config.payload_types)
-        except SdpError as exc:
-            log.info("rejecting INVITE from %s: %s", peer, exc)
-            self._reply(invite, peer, 488, "Not Acceptable Here")
-            return
+        offer = sdp_body(invite)
+        remote = None
+        if offer:
+            try:
+                remote = parse_offer(offer, self.config.payload_types)
+            except SdpError as exc:
+                log.info("rejecting INVITE from %s: %s", peer, exc)
+                self._reply(invite, peer, 488, "Not Acceptable Here")
+                return
         call_id = invite.headers.get("Call-ID") or ""
         self._pending.add(call_id)
         self._reply(invite, peer, 100, "Trying")
         self._spawn(self._answer_call(invite, peer, remote))
 
-    async def _answer_call(self, invite: Request, peer: Address, remote: RemoteMedia) -> None:
+    async def _answer_call(
+        self, invite: Request, peer: Address, remote: RemoteMedia | None
+    ) -> None:
+        """Answer a new INVITE. Without an offer in it, ours goes in the 200 and
+        the answer comes in the ACK; media starts once the answer is known."""
         call_id = invite.headers.get("Call-ID") or ""
         tag = new_tag()
         try:
@@ -376,17 +411,20 @@ class SipServer:
                 log.exception("could not open media for call %s", call_id)
                 self._reply(invite, peer, 500, "Server Internal Error", tag)
                 return
-            try:
-                answer = build_answer(media.local, remote.payload_type)
-            except ValueError:
-                log.exception("media for call %s cannot do the offered codec", call_id)
-                await media.close()
-                self._reply(invite, peer, 500, "Server Internal Error", tag)
-                return
+            if remote is None:
+                local_sdp = build_offer(media.local)
+            else:
+                try:
+                    local_sdp = build_answer(media.local, remote.payload_type)
+                except ValueError:
+                    log.exception("media for call %s cannot do the offered codec", call_id)
+                    await media.close()
+                    self._reply(invite, peer, 500, "Server Internal Error", tag)
+                    return
             self._reply(invite, peer, 180, "Ringing", tag)
             dialog = Dialog.from_invite(invite, tag)
             contact = f"<sip:{self.config.user}@{host}:{self.local_addr[1]}>"
-            call = ServerCall(self, invite, peer, dialog, media, remote, answer, contact)
+            call = ServerCall(self, invite, peer, dialog, media, remote, local_sdp, contact)
             ok = build_response(invite, 200, "OK")
             ok.headers.set("To", dialog.local_from)
             for rr in invite.headers.get_all("Record-Route"):
@@ -395,13 +433,20 @@ class SipServer:
             ok.headers.add("Allow", ALLOW)
             ok.headers.add("Server", self.config.user_agent)
             ok.headers.add("Content-Type", "application/sdp")
-            ok.body = answer.encode()
+            ok.body = local_sdp.encode()
             self._calls[call_id] = call
         finally:
             self._pending.discard(call_id)
         self._answer(invite, peer, ok)
-        log.info("answered call %s from %s:%s (%s)", call_id, *peer, remote.payload_type.name)
         call._start_resending(ok)
+        remote = await call._remote
+        if remote is None:
+            # The ACK had no usable answer, or the call ended before it came.
+            if not call.ended:
+                await call.hangup()
+            return
+        call.remote_media = remote
+        log.info("answered call %s from %s:%s (%s)", call_id, *peer, remote.payload_type.name)
         await media.start(remote)
         if not call.ended:
             call.task = self._spawn(self._run_call(call))

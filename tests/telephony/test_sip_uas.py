@@ -2,18 +2,19 @@ import asyncio
 
 import pytest
 
-from voiceqa.telephony.media import LocalMedia, PayloadType
+from voiceqa.telephony.media import LocalMedia, PayloadType, RemoteMedia
 from voiceqa.telephony.sip import SipConfig, SipStatusError, place_call
 from voiceqa.telephony.sip.dialog import build_invite, via_value
 from voiceqa.telephony.sip.message import (
     Headers,
     Request,
     Response,
+    build_response,
     new_branch,
     parse_message,
     parse_name_addr,
 )
-from voiceqa.telephony.sip.sdp import build_offer, parse_answer
+from voiceqa.telephony.sip.sdp import build_answer, build_offer, parse_answer, parse_offer
 from voiceqa.telephony.sip.uas import ServerConfig, SipServer
 
 CALLER_MEDIA = LocalMedia(host="127.0.0.1", port=40000)
@@ -319,12 +320,114 @@ def test_no_common_codec_is_rejected_with_488_and_no_media_is_opened():
     run(scenario, payload_types=(PayloadType.PCMU,))
 
 
-def test_invite_without_sdp_is_rejected_with_488():
+def offerless_invite(peer, server, content_type=None, body=b""):
+    invite = raw_invite(peer, server)
+    invite.headers.remove("Content-Type")
+    if content_type is not None:
+        invite.headers.add("Content-Type", content_type)
+    invite.body = body
+    return invite
+
+
+def answer_bye(peer, server):
+    bye = peer.requests("BYE")[0]
+    send(peer, server, build_response(bye, 200, "OK"))
+
+
+@pytest.mark.parametrize(
+    "content_type, body",
+    [(None, b""), ("text/plain", b"hello"), ("application/sdp", b"")],
+)
+def test_invite_without_sdp_gets_an_offer_and_the_answer_comes_in_the_ack(content_type, body):
     async def scenario(server, agent):
         peer = await raw_peer()
-        invite = raw_invite(peer, server)
-        invite.body = b""
-        send(peer, server, invite)
+        send(peer, server, offerless_invite(peer, server, content_type, body))
+        await until(lambda: peer.responses("INVITE", 200))
+        assert [r.status for r in peer.responses("INVITE")][:3] == [100, 180, 200]
+        ok = peer.responses("INVITE", 200)[0]
+        assert ok.headers.get("Content-Type") == "application/sdp"
+        (media,) = agent.media
+        offer = parse_offer(ok.body, (PayloadType.PCMU,))
+        assert (offer.host, offer.port) == (media.local.host, media.local.port)
+        assert parse_offer(ok.body, (PayloadType.PCMA,)).payload_type is PayloadType.PCMA
+        # Nothing starts before the answer arrives.
+        await asyncio.sleep(0.1)
+        assert media.starts == 0
+        assert agent.calls == []
+
+        answer = build_answer(CALLER_MEDIA, PayloadType.PCMA)
+        send(peer, server, with_sdp(in_dialog(peer, ok, "ACK", 1), answer))
+        await until(lambda: agent.calls)
+        expected = RemoteMedia("127.0.0.1", CALLER_MEDIA.port, PayloadType.PCMA)
+        assert media.remote == expected
+        assert media.starts == 1
+        assert agent.calls[0].remote_media == expected
+
+        # The 200 stops being resent once the ACK is in.
+        await asyncio.sleep(0.05)
+        count = len(peer.responses("INVITE", 200))
+        await asyncio.sleep(0.4)  # well past the T2 cap of 0.16 s
+        assert len(peer.responses("INVITE", 200)) == count
+
+        # A refresh gets our offer from the 200 as the current SDP.
+        send(peer, server, with_sdp(in_dialog(peer, ok, "INVITE", 2), build_offer(CALLER_MEDIA)))
+        await until(lambda: answers(peer, "INVITE", 2))
+        assert answers(peer, "INVITE", 2)[0].body == ok.body
+        send(peer, server, in_dialog(peer, ok, "ACK", 2))
+        assert_media_untouched(agent, agent.calls[0])
+        await hang_up_raw(peer, server, ok, 3)
+        assert answers(peer, "BYE", 3)[0].status == 200
+
+    run(scenario)
+
+
+NO_COMMON_CODEC = (
+    "v=0\r\no=raw 1 1 IN IP4 127.0.0.1\r\ns=raw\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"
+    "m=audio 40000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n"
+)
+
+
+@pytest.mark.parametrize("answer", [None, NO_COMMON_CODEC, "not sdp at all"])
+def test_ack_without_a_usable_answer_ends_the_offerless_call_with_bye(answer):
+    async def scenario(server, agent):
+        peer = await raw_peer()
+        send(peer, server, offerless_invite(peer, server))
+        await until(lambda: peer.responses("INVITE", 200))
+        ok = peer.responses("INVITE", 200)[0]
+        ack = in_dialog(peer, ok, "ACK", 1)
+        if answer is not None:
+            ack = with_sdp(ack, answer)
+        send(peer, server, ack)
+        await until(lambda: peer.requests("BYE"))
+        answer_bye(peer, server)
+        (media,) = agent.media
+        await until(lambda: media.closed and server.calls == [])
+        assert media.starts == 0
+        assert agent.calls == []
+        peer.transport.close()
+
+    run(scenario)
+
+
+def test_missing_ack_ends_the_offerless_call_with_bye():
+    async def scenario(server, agent):
+        peer = await raw_peer()
+        send(peer, server, offerless_invite(peer, server))
+        await until(lambda: peer.requests("BYE"), timeout=64 * T1 + 3)
+        answer_bye(peer, server)
+        (media,) = agent.media
+        await until(lambda: media.closed and server.calls == [])
+        assert media.starts == 0
+        assert agent.calls == []
+        peer.transport.close()
+
+    run(scenario)
+
+
+def test_garbage_sdp_offer_is_rejected_with_488():
+    async def scenario(server, agent):
+        peer = await raw_peer()
+        send(peer, server, raw_invite(peer, server, offer="not sdp at all"))
         await until(lambda: peer.responses("INVITE", 488))
         assert agent.media == []
         peer.transport.close()

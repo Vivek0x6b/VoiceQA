@@ -17,7 +17,7 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 - Next issue: issue 7 (session refresh and INVITEs without an SDP offer).
 - Known problems:
   - A session refresh (re-INVITE or UPDATE) is answered with 200 and the SDP we sent before, and media keeps running as it was. If the offer moves the far end's media to a new address, port or codec, we do not follow it. Session timers (RFC 4028) are not supported: a refresh with Session-Expires gets a plain 200.
-  - The test agent sends its in-dialog requests (BYE) to the address the INVITE came from, not along the Route set, so it does not work behind a proxy that needs Record-Route followed. It answers at once, so CANCEL never stops a call. INVITEs without an SDP offer get 488 from the agent and are not handled by the UAC either; issue 7 covers both.
+  - The test agent sends its in-dialog requests (BYE) to the address the INVITE came from, not along the Route set, so it does not work behind a proxy that needs Record-Route followed. It answers at once, so CANCEL never stops a call. The agent takes INVITEs without an SDP offer (our offer goes in the 200, the answer comes in the ACK).
   - SIP is UDP and IPv4 only, MD5 digest only, no REGISTER or CANCEL, no NAT rewrite of Contact from `received`/`rport`.
   - RTP has no RTCP, no DTMF and no symmetric RTP source check.
   - If the far end's RTP timestamps jump backwards and stay there, up to 0.5 s of its audio is placed at arrival time and may be dropped as overlapping before the stream is anchored again. Our own event loop stalling for more than 0.5 s has the same effect on the audio queued in the socket during the stall.
