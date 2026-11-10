@@ -15,7 +15,6 @@ Both return the engine's own sample rate (22050 Hz); calls resample later.
 
 import base64
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -72,9 +71,22 @@ _SAPI_VOICES = _SAPI_WRAPPER.replace(
 """,
 )
 
-# One line of `say -v ?`: the name (which may contain spaces), two or more
-# spaces, the locale, then "# sample text".
-_SAY_VOICE_RE = re.compile(r"^(.+?)\s{2,}\S+\s+#")
+
+def parse_say_voices(output: str) -> list[str]:
+    """Voice names from `say -v ?`.
+
+    Each line is "<name> <locale> # <sample text>". Names may contain spaces
+    and long ones fill the column, leaving a single space before the locale,
+    so the line is split on " #" and the last word (the locale) dropped
+    instead of relying on column widths.
+    """
+    names = []
+    for line in output.splitlines():
+        head, sep, _ = line.partition(" #")
+        parts = head.strip().rsplit(None, 1)
+        if sep and len(parts) == 2:
+            names.append(parts[0])
+    return names
 
 
 def _powershell() -> str:
@@ -137,12 +149,7 @@ class SayTts:
 
     def voices(self) -> list[str]:
         out = run_tts_process(["say", "-v", "?"], label="say voice list", timeout=self._timeout)
-        names = []
-        for line in out.decode("utf-8", "replace").splitlines():
-            match = _SAY_VOICE_RE.match(line)
-            if match:
-                names.append(match.group(1).strip())
-        return names
+        return parse_say_voices(out.decode("utf-8", "replace"))
 
     def synthesize(self, text: str, voice: str | None = None) -> Speech:
         with tempfile.TemporaryDirectory(prefix="voiceqa-say-") as tmp:

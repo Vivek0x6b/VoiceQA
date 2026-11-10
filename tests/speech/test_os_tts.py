@@ -7,7 +7,7 @@ import sys
 import numpy as np
 import pytest
 
-from voiceqa.speech.os_tts import OUTPUT_RATE, SapiTts, SayTts
+from voiceqa.speech.os_tts import OUTPUT_RATE, SapiTts, SayTts, parse_say_voices
 from voiceqa.speech.registry import create_tts
 from voiceqa.speech.tts_process import TtsError
 
@@ -75,6 +75,26 @@ def test_sapi_unknown_voice_is_an_error_with_the_reason():
 def test_sapi_off_windows_says_it_needs_windows():
     with pytest.raises(TtsError, match="needs Windows"):
         SapiTts()
+
+
+def test_parse_say_voices_handles_every_column_width():
+    output = (
+        "Albert              en_US    # Hello! My name is Albert.\n"
+        "Bad News            en_US    # Hello! My name is Bad News.\n"
+        "\n"
+        "Eddy (English (UK)) en_GB    # Hello! My name is Eddy.\n"
+        "Grandma (German (Germany)) de_DE    # Hallo! Ich heisse Grandma.\n"
+        "   \n"
+        "Samantha            en_US    # Hello, my name is Samantha. # really\n"
+        "no hash here\n"
+    )
+    assert parse_say_voices(output) == [
+        "Albert",
+        "Bad News",
+        "Eddy (English (UK))",
+        "Grandma (German (Germany))",
+        "Samantha",
+    ]
 
 
 @macos_only
