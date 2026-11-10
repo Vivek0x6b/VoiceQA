@@ -134,6 +134,27 @@ def find_model(model: str, models_dir: str | os.PathLike | None = None) -> Path 
     return _snapshot_with_model(resolve_models_dir(models_dir) / f"models--{org}--{name}")
 
 
+def usable_model(model: str, models_dir: str | os.PathLike | None = None) -> Path:
+    """The folder of `model`, checked to hold everything faster-whisper needs
+    to load it without the network. Raises ModelNotAvailableError naming the
+    fix otherwise."""
+    cache = resolve_models_dir(models_dir)
+    path = find_model(model, cache)
+    if path is None:
+        raise ModelNotAvailableError(
+            f"faster-whisper model {model} is not in {cache}. "
+            f"Download it first: voiceqa models pull stt {model}"
+        )
+    # Without it faster-whisper fetches a tokenizer from the hub, which must
+    # never happen during a run.
+    if not (path / "tokenizer.json").is_file():
+        raise ModelNotAvailableError(
+            f"faster-whisper model folder {path} has no tokenizer.json. Copy it in "
+            "from the original model, or delete the folder and pull the model again."
+        )
+    return path
+
+
 def _size_on_disk(folder: Path) -> int:
     # Snapshot files are often symlinks into blobs/, and newer huggingface_hub
     # versions link those blobs again into a shared store at the cache root.

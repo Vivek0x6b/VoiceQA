@@ -557,6 +557,105 @@ def test_a_start_async_cancelled_before_its_thread_runs_starts_nothing(monkeypat
     assert worker.pid is None
 
 
+def test_a_cancelled_wait_ready_does_not_spoil_later_waits():
+    with fake_worker() as worker:
+        # Gives up long before a spawned child can have loaded the engine.
+        with pytest.raises(TimeoutError):
+            run(asyncio.wait_for(worker.wait_ready(), 0.05))
+        run(worker.wait_ready())
+
+
+def wait_for_exit(worker):
+    deadline = time.monotonic() + WAIT
+    while worker.exitcode is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def test_close_during_a_start_waits_for_it_and_stops_the_child(monkeypatch):
+    in_spawn = threading.Event()
+    go = threading.Event()
+    real_start = multiprocessing.context.SpawnProcess.start
+
+    def slow_start(self):
+        in_spawn.set()
+        go.wait(WAIT)
+        real_start(self)
+
+    monkeypatch.setattr(multiprocessing.context.SpawnProcess, "start", slow_start)
+    worker = fake_worker()
+    starter = threading.Thread(target=worker.start)
+    starter.start()
+    assert in_spawn.wait(WAIT)
+    closer = threading.Thread(target=worker.close)
+    closer.start()
+    # close() must not return while the spawn it would miss is still going.
+    closer.join(0.2)
+    assert closer.is_alive()
+    go.set()
+    starter.join(WAIT)
+    closer.join(WAIT)
+
+    assert not closer.is_alive()
+    assert worker.exitcode is not None
+    assert not worker.is_alive()
+
+
+def test_close_before_start_async_gets_going_starts_nothing(monkeypatch):
+    held = []
+
+    class HeldThread(threading.Thread):
+        def start(self):
+            held.append(self)
+
+    monkeypatch.setattr(
+        worker_module, "threading", SimpleNamespace(Thread=HeldThread, Lock=threading.Lock)
+    )
+    worker = fake_worker()
+
+    async def main():
+        task = asyncio.create_task(worker.start_async())
+        while not held:
+            await asyncio.sleep(0.01)
+        worker.close()
+        threading.Thread.start(held[0])
+        with pytest.raises(SttWorkerError, match="closed"):
+            await task
+
+    run(main())
+
+    assert worker.pid is None
+
+
+def test_a_late_cancel_of_start_async_closes_off_the_event_loop():
+    closed_on = []
+
+    class Recording(SttWorker):
+        def close(self, timeout=DEFAULT_CLOSE_TIMEOUT):
+            closed_on.append(threading.current_thread())
+            super().close(timeout)
+
+    worker = Recording("fake", transcript=SCRIPTED.model_dump())
+
+    async def main():
+        task = asyncio.create_task(worker.start_async())
+        await asyncio.sleep(0)
+        # Block the loop until start() is done in its thread, so the cancel
+        # below lands after the start finished but before the task resumes.
+        deadline = time.monotonic() + WAIT
+        while worker._reader is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return threading.current_thread()
+
+    loop_thread = run(main())
+    wait_for_exit(worker)
+
+    assert worker.exitcode is not None
+    assert closed_on and loop_thread not in closed_on
+
+
 def test_the_child_never_reaches_the_hugging_face_hub(monkeypatch):
     # _serve runs here in the test process so the engine can report the
     # environment it was built in.

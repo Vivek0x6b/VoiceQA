@@ -12,7 +12,7 @@ import numpy as np
 
 from voiceqa.audio.dsp import resample
 
-from .model_cache import STT_EXTRA_HINT, ModelNotAvailableError, find_model, resolve_models_dir
+from .model_cache import STT_EXTRA_HINT, usable_model
 from .models import Segment, Transcript, Word
 
 try:
@@ -45,20 +45,7 @@ class FasterWhisperStt:
         self._word_timestamps = word_timestamps
         self._vad_filter = vad_filter
 
-        cache = resolve_models_dir(models_dir)
-        path = find_model(model, cache)
-        if path is None:
-            raise ModelNotAvailableError(
-                f"faster-whisper model {model} is not in {cache}. "
-                f"Download it first: voiceqa models pull stt {model}"
-            )
-        # Without it faster-whisper fetches a tokenizer from the hub, which
-        # must never happen during a run.
-        if not (path / "tokenizer.json").is_file():
-            raise ModelNotAvailableError(
-                f"faster-whisper model folder {path} has no tokenizer.json. Copy it in "
-                "from the original model, or delete the folder and pull the model again."
-            )
+        path = usable_model(model, models_dir)
         self._model = WhisperModel(
             str(path), device=device, compute_type=compute_type, cpu_threads=cpu_threads
         )

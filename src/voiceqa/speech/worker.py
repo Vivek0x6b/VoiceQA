@@ -139,6 +139,9 @@ class SttWorker:
         self._load_answered = False
         self._pending: dict[int, Future[Transcript]] = {}
         self._lock = threading.Lock()
+        self._start_lock = threading.Lock()
+        # Starts in flight, from start() and start_async(); guarded by _lock.
+        self._starting = 0
         self._ids = itertools.count()
         self._load_error: SttWorkerError | None = None
         self._ended = False
@@ -147,7 +150,24 @@ class SttWorker:
     def start(self) -> "SttWorker":
         """Spawn the child. Raises SttWorkerError, leaving nothing running,
         if it cannot be started (for example an engine argument that cannot
-        be pickled)."""
+        be pickled) or if close() came first."""
+        with self._lock:
+            if self._closed:
+                raise SttWorkerError("STT worker is closed")
+            self._starting += 1
+        try:
+            # close() takes this lock too, so it waits for a spawn in progress
+            # and then stops what it brought up.
+            with self._start_lock:
+                with self._lock:
+                    if self._closed:
+                        raise SttWorkerError("STT worker is closed")
+                return self._spawn()
+        finally:
+            with self._lock:
+                self._starting -= 1
+
+    def _spawn(self) -> "SttWorker":
         if self._process is not None:
             raise SttWorkerError("STT worker already started")
         # Checked before any child exists. On Windows, Process.start() creates
@@ -196,14 +216,22 @@ class SttWorker:
         started: Future[SttWorker] = Future()
 
         def run() -> None:
-            # Cancelled before this thread got going: nothing to start.
-            if not started.set_running_or_notify_cancel():
-                return
             try:
-                started.set_result(self.start())
-            except BaseException as exc:
-                started.set_exception(exc)
+                # Cancelled before this thread got going: nothing to start.
+                if not started.set_running_or_notify_cancel():
+                    return
+                try:
+                    started.set_result(self.start())
+                except BaseException as exc:
+                    started.set_exception(exc)
+            finally:
+                with self._lock:
+                    self._starting -= 1
 
+        # Counted from now, not from when the thread runs, so a close() in
+        # between knows a start is on its way.
+        with self._lock:
+            self._starting += 1
         threading.Thread(target=run, name="voiceqa-stt-start", daemon=True).start()
         try:
             return await asyncio.wrap_future(started)
@@ -214,8 +242,12 @@ class SttWorker:
             raise
 
     def _close_once_started(self, started: "Future[SttWorker]") -> None:
+        # This can run on the event loop thread, and close() blocks for as
+        # long as the child takes to stop.
         if not started.cancelled() and started.exception() is None:
-            self.close(0)
+            threading.Thread(
+                target=self.close, args=(0,), name="voiceqa-stt-close", daemon=True
+            ).start()
 
     @property
     def pid(self) -> int | None:
@@ -263,18 +295,25 @@ class SttWorker:
         if it could not be built (missing extra or model, unknown name)."""
         if self._process is None:
             raise SttWorkerError("STT worker not started")
-        await asyncio.wrap_future(self._ready)
+        # _ready is shared by every caller; one caller giving up (a timeout)
+        # must not cancel it for the rest.
+        await asyncio.shield(asyncio.wrap_future(self._ready))
 
     def close(self, timeout: float = DEFAULT_CLOSE_TIMEOUT) -> None:
         """Stop the child. Jobs already queued may finish within `timeout`
         seconds; after that the child is terminated and the jobs still
         pending fail with SttWorkerError. Safe to call more than once, and
-        on a worker that never started."""
+        on a worker that never started. A start in progress is waited for
+        and then stopped; one not yet begun fails with SttWorkerError."""
         with self._lock:
-            if self._process is None or self._closed:
+            if self._closed or (self._process is None and not self._starting):
                 return
             self._closed = True
+        with self._start_lock:
+            pass
         process = self._process
+        if process is None:
+            return
         if process.is_alive():
             self._jobs.put(None)
         process.join(timeout)

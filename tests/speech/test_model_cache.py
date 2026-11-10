@@ -13,6 +13,7 @@ from voiceqa.speech.model_cache import (
     is_local_model,
     repo_id,
     resolve_models_dir,
+    usable_model,
 )
 
 
@@ -133,6 +134,19 @@ def test_find_model_accepts_a_bare_folder_name_in_the_working_dir(tmp_path, monk
     (tmp_path / "my-model").mkdir()
     (tmp_path / "my-model" / "model.bin").write_bytes(b"x")
     assert find_model("my-model", tmp_path / "cache") == Path("my-model")
+
+
+def test_usable_model_names_the_pull_command_when_missing(tmp_path):
+    with pytest.raises(ModelNotAvailableError, match="voiceqa models pull stt tiny.en"):
+        usable_model("tiny.en", tmp_path)
+
+
+def test_usable_model_needs_tokenizer_json(tmp_path, make_cached_model):
+    snapshot = make_cached_model(tmp_path, "Systran/faster-whisper-tiny.en", {"model.bin": b"x"})
+    with pytest.raises(ModelNotAvailableError, match="tokenizer.json"):
+        usable_model("tiny.en", tmp_path)
+    (snapshot / "tokenizer.json").write_bytes(b"{}")
+    assert usable_model("tiny.en", tmp_path) == snapshot
 
 
 def test_cached_models_lists_whisper_models_with_size(tmp_path, make_cached_model):

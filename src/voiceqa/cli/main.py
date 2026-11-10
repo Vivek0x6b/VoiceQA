@@ -34,6 +34,7 @@ from voiceqa.speech.model_cache import (
     pull_stt_model,
     repo_id,
     resolve_models_dir,
+    usable_model,
 )
 from voiceqa.speech.models import Transcript
 from voiceqa.speech.registry import create_tts, default_tts_name
@@ -266,11 +267,7 @@ def _stt_worker(model: str, models_dir: Path | None) -> SttWorker:
     if not model_cache.stt_extra_installed():
         raise SttExtraMissingError(f"transcription needs the [stt] extra: {STT_EXTRA_HINT}")
     directory = resolve_models_dir(models_dir)
-    if find_model(model, directory) is None:
-        raise ModelNotAvailableError(
-            f"faster-whisper model {model} is not in {directory}. "
-            f"Download it first: voiceqa models pull stt {model}"
-        )
+    usable_model(model, directory)
     return SttWorker("faster-whisper", model=model, models_dir=str(directory))
 
 

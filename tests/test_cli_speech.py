@@ -465,6 +465,16 @@ def test_call_transcribe_without_the_model_never_dials(tmp_path, fake_call, mode
     assert fake_call["calls"] == 0
 
 
+def test_call_transcribe_with_a_model_missing_tokenizer_json_never_dials(
+    tmp_path, fake_call, models_env, stt_extra
+):
+    make_cached_model(models_env, "tiny.en", 5)
+    result = runner.invoke(app, call_args(tmp_path, "--transcribe", "--stt-model", "tiny.en"))
+    assert result.exit_code == 1
+    assert "tokenizer.json" in result.stderr
+    assert fake_call["calls"] == 0
+
+
 def test_call_transcribe_skips_an_unanswered_call(tmp_path, fake_call, fake_worker, models_env):
     fake_call["answered"] = False
     result = runner.invoke(app, call_args(tmp_path, "--transcribe"))
