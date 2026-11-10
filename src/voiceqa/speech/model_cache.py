@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MODELS_DIR_ENV = "VOICEQA_MODELS_DIR"
-STT_EXTRA_HINT = "pip install voiceqa[stt]"
+STT_EXTRA_HINT = 'pip install -e ".[stt]" (from the VoiceQA checkout)'
 
 # Whole-repo sizes from the Hugging Face API, checked 2026-11-09.
 KNOWN_SIZES_MB = {"tiny.en": 78.1, "base.en": 147.8, "small.en": 486.1}

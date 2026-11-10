@@ -10,17 +10,17 @@ import os
 
 import numpy as np
 
+from voiceqa.audio.dsp import resample
+
+from .model_cache import STT_EXTRA_HINT, ModelNotAvailableError, find_model, resolve_models_dir
+from .models import Segment, Transcript, Word
+
 try:
     from faster_whisper import WhisperModel
 except ImportError as exc:
     raise ImportError(
-        "the faster-whisper STT backend needs the [stt] extra: pip install voiceqa[stt]"
+        f"the faster-whisper STT backend needs the [stt] extra: {STT_EXTRA_HINT}"
     ) from exc
-
-from voiceqa.audio.dsp import resample
-
-from .model_cache import ModelNotAvailableError, find_model, resolve_models_dir
-from .models import Segment, Transcript, Word
 
 DEFAULT_MODEL = "base.en"
 WHISPER_RATE = 16000

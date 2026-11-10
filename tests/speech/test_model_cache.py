@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -133,7 +134,8 @@ def test_stt_extra_installed_follows_find_spec(monkeypatch):
 
 def test_pull_without_the_extra_names_it(monkeypatch, tmp_path):
     monkeypatch.setattr(model_cache, "stt_extra_installed", lambda: False)
-    with pytest.raises(model_cache.SttExtraMissingError, match=r"voiceqa\[stt\]"):
+    hint = re.escape(model_cache.STT_EXTRA_HINT)
+    with pytest.raises(model_cache.SttExtraMissingError, match=hint):
         model_cache.pull_stt_model("tiny.en", tmp_path)
 
 

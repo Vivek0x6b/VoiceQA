@@ -1,10 +1,12 @@
 import importlib
+import re
 import sys
 
 import pytest
 import yaml
 
 from voiceqa.speech import FakeStt, FakeTts, WavPromptTts
+from voiceqa.speech.model_cache import STT_EXTRA_HINT
 from voiceqa.speech.plugin_tts import PluginTts
 from voiceqa.speech.registry import create_stt, create_tts, default_tts_name
 from voiceqa.speech.tts_process import TtsError
@@ -50,14 +52,14 @@ def test_default_tts_name_per_os(monkeypatch, platform, expected):
 def test_importing_the_whisper_backend_without_the_extra_names_it(monkeypatch):
     monkeypatch.setitem(sys.modules, "faster_whisper", None)
     monkeypatch.delitem(sys.modules, "voiceqa.speech.whisper", raising=False)
-    with pytest.raises(ImportError, match=r"voiceqa\[stt\]"):
+    with pytest.raises(ImportError, match=re.escape(STT_EXTRA_HINT)):
         importlib.import_module("voiceqa.speech.whisper")
 
 
 def test_create_stt_faster_whisper_without_the_extra_names_it(monkeypatch):
     monkeypatch.setitem(sys.modules, "faster_whisper", None)
     monkeypatch.delitem(sys.modules, "voiceqa.speech.whisper", raising=False)
-    with pytest.raises(ImportError, match=r"voiceqa\[stt\]"):
+    with pytest.raises(ImportError, match=re.escape(STT_EXTRA_HINT)):
         create_stt("faster-whisper", model="tiny.en")
 
 

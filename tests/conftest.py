@@ -2,14 +2,19 @@ import os
 
 import pytest
 
-from voiceqa.speech.model_cache import find_model, resolve_models_dir, stt_extra_installed
+from voiceqa.speech.model_cache import (
+    STT_EXTRA_HINT,
+    find_model,
+    resolve_models_dir,
+    stt_extra_installed,
+)
 
 TEST_MODEL = "tiny.en"
 
 
 def _model_skip_reason() -> str | None:
     if not stt_extra_installed():
-        return "needs the [stt] extra: pip install voiceqa[stt]"
+        return f"needs the [stt] extra: {STT_EXTRA_HINT}"
     if find_model(TEST_MODEL, resolve_models_dir()) is None:
         return (
             f"{TEST_MODEL} is not in {resolve_models_dir()}; "
