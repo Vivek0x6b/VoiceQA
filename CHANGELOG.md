@@ -62,7 +62,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `WavPromptTts`: maps text to a WAV file from a YAML index (text to file path, relative to the index file's folder) or from an in-memory mapping. Text is matched after stripping whitespace, case sensitive. Unknown text is a `ValueError` naming it, never silence. Keeps the file's own sample rate and downmixes stereo to mono.
 - `FakeTts` (tone bursts whose length follows the text) and `FakeStt` (a scripted `Transcript`, given as a `Transcript` or as plain data) for tests that need a TTS or STT engine without real speech.
 - `create_tts(name, **kwargs)` and `create_stt(name, **kwargs)`: look up a TTS or STT engine by name (`wav`, `fake`, `sapi`, `say`, `faster-whisper`, `plugin:<name>`) from plain, picklable keyword arguments only. An unknown name raises `ValueError` listing the known engines.
-- `SttWorker.start_async()`, and `async with SttWorker(...)`, spawn the child from a thread so the event loop keeps running. A cancelled start closes the child once it is up, from a thread of its own.
+- `SttWorker.start_async()`, and `async with SttWorker(...)`, spawn the child from a thread so the event loop keeps running. A cancelled start closes the worker at once, so a retry is refused, and stops the child once it is up, from a thread of its own.
 - `FakeStt(echo=True)` returns a segment describing the job ("800 samples at 8000 Hz"), so a test can tell when a result went to the wrong job.
 
 ### Changed

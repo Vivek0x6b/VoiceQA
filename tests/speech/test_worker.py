@@ -492,17 +492,20 @@ def test_async_with_starts_the_child_off_the_event_loop(clip):
     assert started_on[0] is not loop_thread
 
 
-def test_a_cancelled_start_async_stops_the_child_once_it_is_up():
+def test_a_cancelled_start_async_stops_the_child_once_it_is_up(monkeypatch):
+    # Held inside the spawn, past start()'s closed check, so the child does
+    # come up after the cancel.
     entered = threading.Event()
     go = threading.Event()
+    real_start = multiprocessing.context.SpawnProcess.start
 
-    class Slow(SttWorker):
-        def start(self):
-            entered.set()
-            go.wait(WAIT)
-            return super().start()
+    def slow_start(self):
+        entered.set()
+        go.wait(WAIT)
+        real_start(self)
 
-    worker = Slow("fake", transcript=SCRIPTED.model_dump())
+    monkeypatch.setattr(multiprocessing.context.SpawnProcess, "start", slow_start)
+    worker = fake_worker()
 
     async def main():
         task = asyncio.create_task(worker.start_async())
@@ -557,12 +560,82 @@ def test_a_start_async_cancelled_before_its_thread_runs_starts_nothing(monkeypat
     assert worker.pid is None
 
 
-def test_a_cancelled_wait_ready_does_not_spoil_later_waits():
+def test_a_cancelled_wait_ready_does_not_spoil_later_waits(monkeypatch):
+    # The reader holds the child's "ready" until the first wait is cancelled.
+    release = threading.Event()
+    real_loads = pickle.loads
+
+    def loads(data):
+        message = real_loads(data)
+        if message[0] == "ready":
+            release.wait(WAIT)
+        return message
+
+    monkeypatch.setattr(worker_module, "pickle", SimpleNamespace(loads=loads, dumps=pickle.dumps))
     with fake_worker() as worker:
-        # Gives up long before a spawned child can have loaded the engine.
-        with pytest.raises(TimeoutError):
-            run(asyncio.wait_for(worker.wait_ready(), 0.05))
-        run(worker.wait_ready())
+
+        async def main():
+            waiting = asyncio.ensure_future(worker.wait_ready())
+            await asyncio.sleep(0.05)
+            assert not waiting.done()
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            release.set()
+            await worker.wait_ready()
+
+        run(main())
+
+
+def test_a_retry_after_a_late_cancel_of_start_async_is_refused(monkeypatch):
+    # Teardown threads are held back, so a retry runs before any of them.
+    held = []
+
+    class HeldCloseThread(threading.Thread):
+        def start(self):
+            if self.name == "voiceqa-stt-close":
+                held.append(self)
+            else:
+                super().start()
+
+    monkeypatch.setattr(
+        worker_module, "threading", SimpleNamespace(Thread=HeldCloseThread, Lock=threading.Lock)
+    )
+    spawned = []
+    real_start = multiprocessing.context.SpawnProcess.start
+
+    def counting_start(self):
+        spawned.append(self)
+        real_start(self)
+
+    monkeypatch.setattr(multiprocessing.context.SpawnProcess, "start", counting_start)
+    worker = fake_worker()
+
+    async def main():
+        task = asyncio.create_task(worker.start_async())
+        await asyncio.sleep(0)
+        # Block the loop until start() is done, so the cancel lands late.
+        deadline = time.monotonic() + WAIT
+        while worker._reader is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with pytest.raises(SttWorkerError, match="closed"):
+            worker.start()
+        with pytest.raises(SttWorkerError, match="closed"):
+            await worker.start_async()
+
+    run(main())
+    first_child = spawned[0]
+    for thread in held:
+        threading.Thread.start(thread)
+        thread.join(WAIT)
+    wait_for_exit(worker)
+
+    assert spawned == [first_child]
+    assert worker._process is first_child
+    assert worker.exitcode is not None
 
 
 def wait_for_exit(worker):
@@ -630,9 +703,9 @@ def test_a_late_cancel_of_start_async_closes_off_the_event_loop():
     closed_on = []
 
     class Recording(SttWorker):
-        def close(self, timeout=DEFAULT_CLOSE_TIMEOUT):
+        def _stop(self, process, timeout):
             closed_on.append(threading.current_thread())
-            super().close(timeout)
+            super()._stop(process, timeout)
 
     worker = Recording("fake", transcript=SCRIPTED.model_dump())
 

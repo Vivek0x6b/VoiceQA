@@ -236,18 +236,25 @@ class SttWorker:
         try:
             return await asyncio.wrap_future(started)
         except asyncio.CancelledError:
-            # The spawn cannot be stopped half way. This runs in the start
-            # thread once it is done, or here at once if it already is.
-            started.add_done_callback(self._close_once_started)
+            # Closed now, before the caller sees the cancel, so a retry is
+            # refused. The spawn itself cannot be stopped half way; the child
+            # it brings up is stopped once it is done.
+            with self._lock:
+                already_closed = self._closed
+                self._closed = True
+            if not already_closed:
+                started.add_done_callback(self._stop_once_started)
             raise
 
-    def _close_once_started(self, started: "Future[SttWorker]") -> None:
-        # This can run on the event loop thread, and close() blocks for as
-        # long as the child takes to stop.
-        if not started.cancelled() and started.exception() is None:
-            threading.Thread(
-                target=self.close, args=(0,), name="voiceqa-stt-close", daemon=True
-            ).start()
+    def _stop_once_started(self, started: "Future[SttWorker]") -> None:
+        # Runs in the start thread, or on the event loop thread if the start
+        # was already done, so the blocking part goes to a thread of its own.
+        process = self._process
+        if started.cancelled() or started.exception() is not None or process is None:
+            return
+        threading.Thread(
+            target=self._stop, args=(process, 0), name="voiceqa-stt-close", daemon=True
+        ).start()
 
     @property
     def pid(self) -> int | None:
@@ -311,9 +318,12 @@ class SttWorker:
             self._closed = True
         with self._start_lock:
             pass
-        process = self._process
-        if process is None:
-            return
+        if self._process is not None:
+            self._stop(self._process, timeout)
+
+    def _stop(self, process, timeout: float) -> None:
+        # Called only once _closed is set, so no later start can swap in
+        # another process: `process` stays the worker's only child.
         if process.is_alive():
             self._jobs.put(None)
         process.join(timeout)
