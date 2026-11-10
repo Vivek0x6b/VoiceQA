@@ -5,8 +5,9 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 ## Current status
 
 - Current milestone: M2 (local STT and TTS). Issues: 1 speech interfaces, fakes and WAV prompts; 2 faster-whisper STT backend; 3 call transcripts and `voiceqa transcribe`; 4 OS TTS engines and the plugin runner; 5 loopback check and docs.
-- Finished M2 issues: issue 1, speech interfaces (`Speech`, `TextToSpeech`, `SpeechToText`), the `Word`/`Segment`/`Transcript` models, `WavPromptTts`, `FakeTts`/`FakeStt`, and the `create_tts`/`create_stt` registry.
-- Next issue: M2 issue 2, the faster-whisper STT backend behind the `[stt]` extra.
+- Finished M2 issues: issue 1, speech interfaces (`Speech`, `TextToSpeech`, `SpeechToText`), the `Word`/`Segment`/`Transcript` models, `WavPromptTts`, `FakeTts`/`FakeStt`, and the `create_tts`/`create_stt` registry. Issue 2, the faster-whisper STT backend behind the `[stt]` extra, `voiceqa models pull/list`, model info in `voiceqa doctor`, the LibriVox test clip, real-model tests in CI with a cached tiny.en, and `voiceqa bench stt`.
+- Next issue: M2 issue 3, call transcripts in a worker process and `voiceqa transcribe`.
+- M2 known problems: the test clip's reference text is the book's text and was not checked by ear. Both tiny.en and base.en hear "Stella, the in slender" for its first words, "Della, being slender", so the reader may differ from the book there. The real-model WER bounds allow for it.
 - M1 (local SIP call with two-way audio and recording) is done. All seven issues are finished and CI passes on Windows, macOS and Linux for Python 3.11 to 3.13. What M1 gives: `voiceqa agent` (a local echo or WAV playback agent), `voiceqa call` (one SIP call with recording of both sides and events.json) and `voiceqa calibrate` (VoiceQA's own round-trip floor). Its limits are listed under known problems below.
 - Finished M1 issues: issue 1 (G.711 codec and WAV I/O), issue 2 (RTP sender and receiver with 20 ms pacing), issue 3 (SIP UAC with INVITE, ACK, BYE, digest auth and SDP offer/answer), issue 4 (local test agent), issue 5 (recording both directions on a shared clock), issue 6 (`voiceqa call` and `voiceqa calibrate` commands, plus an end-to-end subprocess test in CI and a README quick start), issue 7 (session refresh, INVITEs without an SDP offer, and CANCEL before the agent answers). The project scaffold, CLI (`version`, `doctor`) and CI were done before that.
 - M1 issues:
@@ -59,6 +60,24 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 - Neural TTS engines (Kokoro, Piper) can only be added as separately installed plugins that VoiceQA runs as a subprocess and never imports. Piper is GPL-3.0. Kokoro itself is Apache-2.0 and its English pipeline runs without espeak-ng (it uses it only for words missing from its dictionary, and drops those words without it), but installing it pulls in `phonemizer-fork` (GPLv3+) and `espeakng-loader`, which ships the espeak-ng library (GPL-3.0). Checked on 2026-11-09 against kokoro 0.9.4 and misaki 0.9.4.
 - CI caches the `tiny.en` model (78 MB) and runs the real-model STT tests on all three OSes.
 - Test speech is a public-domain LibriVox clip, downsampled to 8 kHz, with its source and licence noted next to it in the repo.
+- Model sizes (whole Hugging Face repo, checked 2026-11-09): tiny.en 78.1 MB, base.en 147.8 MB, small.en 486.1 MB.
+- `FasterWhisperStt` loads its model in the constructor and takes only plain keyword arguments (`model`, `models_dir`, `device`, `compute_type`, `language`, `beam_size`, `word_timestamps`, `vad_filter`, `cpu_threads`, `download`), so the issue 3 worker can build it in a spawned child through `create_stt`. A model that is not on disk raises `ModelNotAvailableError` naming `voiceqa models pull stt <model>`. Only `download=True` fetches it; the CLI uses that path only in `voiceqa models pull` and in `voiceqa bench stt`, and prints what it downloads and where first.
+- The models folder uses the Hugging Face hub cache layout in every case, so `--models-dir` and `VOICEQA_MODELS_DIR` are passed to faster-whisper as its download root. Order: `--models-dir`, then `VOICEQA_MODELS_DIR`, then the Hugging Face cache (worked out like huggingface_hub does: `HF_HUB_CACHE`, `HF_HOME/hub`, `XDG_CACHE_HOME/huggingface/hub`, `~/.cache/huggingface/hub`). `speech/model_cache.py` reads this without importing faster-whisper, so `voiceqa doctor` and `voiceqa models list` work without the extra.
+- A model's size on disk is the sum of the files its snapshot links resolve to, each counted once. huggingface_hub 2.x links blobs again into a shared `blobs/` store at the cache root, so the repo folder alone does not hold the model bytes. CI therefore caches the whole models folder (it only holds tiny.en), not one repo folder.
+- The `[stt]` extra pulls in faster-whisper (MIT), ctranslate2 (MIT), onnxruntime (MIT), PyAV (BSD-3-Clause, wheels bundle LGPL FFmpeg, dynamically linked), tokenizers and huggingface_hub (Apache-2.0) and their small dependencies. No GPL package. Checked 2026-11-09 with faster-whisper 1.2.1 on Python 3.11.
+- `voiceqa bench stt` runs in the CLI process, not in the issue 3 worker: it measures the model, not the IPC. The test clip ships in the wheel (`voiceqa/data/speech`) so the bench also works outside a source checkout.
+- Real-model tests carry the `model` marker. They skip with the reason when the extra or tiny.en is missing, except when `VOICEQA_REQUIRE_MODEL_TESTS` is set (CI sets it), where a missing model fails.
+
+## STT CPU baseline (informational)
+
+Measured with `voiceqa bench stt` on 2026-11-09: Windows 11, Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz (6 cores, 12 threads), Python 3.11.3, faster-whisper 1.2.1, ctranslate2 4.8.5, CPU int8, on the 18.1 s test clip (4 utterances). Real-time factor is processing time divided by audio length. These are for comparison only, nothing gates on them, and they move by 10 to 40 percent between runs.
+
+| Model | Model load | Real-time factor | Utterance median | p95 | max |
+|-------|-----------|------------------|------------------|-----|-----|
+| tiny.en | 0.51 s | 0.084 | 600 ms | 857 ms | 899 ms |
+| base.en | 0.70 s | 0.139 | 1009 ms | 1064 ms | 1072 ms |
+
+Word error rate on the same clip (book text as reference): tiny.en 0.128, base.en 0.064.
 
 ## Media interface
 
@@ -94,9 +113,13 @@ src/voiceqa/
     fakes.py        FakeTts, FakeStt for tests
     wav_prompts.py  WavPromptTts: text to WAV file, from a YAML index or a mapping
     registry.py     create_tts, create_stt by name, plus the subprocess plugin contract
+    whisper.py      FasterWhisperStt (needs the [stt] extra)
+    model_cache.py  models folder, cached model listing and size, model download
+    bench.py        STT speed check on the test clip (voiceqa bench stt)
   cli/              Typer commands
   __main__.py       lets `python -m voiceqa` run the CLI
 tests/
+  data/speech/      LibriVox test clip (8 kHz), utterances.json, SOURCE.md
 docs/
 examples/scenarios/
 ```

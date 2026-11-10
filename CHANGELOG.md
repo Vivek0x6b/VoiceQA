@@ -34,6 +34,12 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `src/voiceqa/__main__.py`, so `python -m voiceqa` runs the CLI without the console script being on PATH.
 - End-to-end test: runs `voiceqa agent` and `voiceqa call` as real subprocesses through `python -m voiceqa`, and checks the exit code, the printed summary, the recorded files, the tone frequency and onset timing in agent.wav, and the order of events in events.json. Runs on Windows, macOS and Linux in CI.
 - README quick start section showing `voiceqa agent`, `voiceqa call` and `voiceqa calibrate` with real output and what lands in the recording folder.
+- faster-whisper speech-to-text backend (`create_stt("faster-whisper", ...)`), installed with the optional `[stt]` extra. Audio is resampled to 16 kHz with our own resampler. Defaults: CPU, int8, `base.en`, word timestamps and VAD filter on. A model that is not on disk is an error naming the pull command, so nothing is downloaded during a call.
+- `voiceqa models pull stt <model>` and `voiceqa models list`. Models live in the Hugging Face cache, or in `--models-dir` / `VOICEQA_MODELS_DIR`.
+- `voiceqa doctor` shows whether the `[stt]` extra is installed, the models folder in use and each cached model with its size.
+- `voiceqa bench stt [--stt-model M] [--models-dir D] [--json]`: model load time, real-time factor and per-utterance latency on this CPU, measured on the test clip after one warm-up run. Informational only.
+- Test speech fixture: 18 s of a public-domain LibriVox reading of The Gift of the Magi at 8 kHz, with utterance times, the book's text and a SOURCE.md. It also ships in the wheel for `voiceqa bench stt`.
+- Real-model tests (pytest marker `model`) run tiny.en against the fixture and check the word error rate. CI caches tiny.en, runs them on all nine jobs and adds the bench numbers to the job summary.
 
 ### Changed
 
