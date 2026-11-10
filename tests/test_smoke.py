@@ -3,6 +3,7 @@ import re
 import shutil
 from pathlib import Path
 
+import typer
 from typer.testing import CliRunner
 
 import voiceqa
@@ -62,6 +63,37 @@ def test_call_help_lists_its_options():
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     for option in ("--server", "--user", "--play", "--record-dir", "--duration", "--codec"):
         assert option in plain
+
+
+def test_call_help_shows_the_stt_extra_name():
+    result = runner.invoke(app, ["call", "--help"])
+    assert result.exit_code == 0
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    # Once in the --transcribe help and once in the command description.
+    assert plain.count("[stt]") == 2
+
+
+def _commands(command, path=()):
+    yield path, command
+    for name, sub in getattr(command, "commands", {}).items():
+        yield from _commands(sub, (*path, name))
+
+
+def test_every_bracketed_word_in_help_text_survives_rich_markup():
+    """Rich reads "[stt]" as a style tag and drops it unless it is escaped."""
+    root = typer.main.get_command(app)
+    checked = 0
+    for path, command in _commands(root):
+        texts = [command.help or ""] + [getattr(p, "help", None) or "" for p in command.params]
+        words = {w for text in texts for w in re.findall(r"\[\w+\]", text)}
+        if not words:
+            continue
+        result = runner.invoke(app, [*path, "--help"])
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        for word in words:
+            assert word in plain, f"{' '.join(path)} --help lost {word}"
+            checked += 1
+    assert checked > 0
 
 
 def test_call_without_server_or_host_fails_with_bad_options():

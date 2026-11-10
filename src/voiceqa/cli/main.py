@@ -516,10 +516,12 @@ def call(
         typer.Option(help="Hang up this many seconds after the answer.", callback=_positive),
     ] = 10.0,
     codec: Annotated[Codec, typer.Option(help="Payload type to offer.")] = Codec.pcmu,
+    # Help text goes through Rich markup, which would drop a bare "[stt]".
     transcribe: Annotated[
         bool,
         typer.Option(
-            "--transcribe", help="After the call, write transcript.json (needs the [stt] extra)."
+            "--transcribe",
+            help="After the call, write transcript.json (needs the \\[stt] extra).",
         ),
     ] = False,
     stt_model: SttModelOption = "base.en",
@@ -544,7 +546,7 @@ def call(
 
     With --transcribe, the recording is transcribed once the call is over.
     The exit code is still the call's: if the transcript cannot be made
-    (no [stt] extra, model not downloaded), the error and its fix are
+    (no \\[stt] extra, model not downloaded), the error and its fix are
     printed and no transcript.json is written.
     """
     if say_text is not None and play is not None:
