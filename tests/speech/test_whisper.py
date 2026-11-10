@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from voiceqa.audio.dsp import generate_tone
-from voiceqa.speech import create_stt
+from voiceqa.speech import create_stt, model_cache
 from voiceqa.speech.model_cache import ModelNotAvailableError
 
 pytest.importorskip("faster_whisper", reason="needs the [stt] extra")
@@ -124,22 +124,17 @@ def test_missing_model_is_an_error_naming_the_pull_command(fake_model, tmp_path)
     assert FakeWhisperModel.instances == []
 
 
-def test_missing_model_is_downloaded_only_when_asked(
-    fake_model, monkeypatch, tmp_path, make_cached_model
-):
-    pulled = []
+def test_the_backend_never_downloads(fake_model, monkeypatch, tmp_path):
+    def no_network(*args, **kwargs):
+        raise AssertionError("the backend must not download")
 
-    def fake_pull(model, models_dir):
-        pulled.append((model, models_dir))
-        return make_cached_model(models_dir, "Systran/faster-whisper-base.en", {"model.bin": b"x"})
-
-    monkeypatch.setattr(whisper, "pull_stt_model", fake_pull)
-    empty = tmp_path / "empty"
-
-    whisper.FasterWhisperStt(model="base.en", models_dir=empty, download=True)
-
-    assert pulled == [("base.en", empty)]
-    assert len(FakeWhisperModel.instances) == 1
+    monkeypatch.setattr(model_cache, "_download", no_network)
+    with pytest.raises(ModelNotAvailableError):
+        whisper.FasterWhisperStt(model="base.en", models_dir=tmp_path / "empty")
+    # No way to ask it to, either: downloads go through voiceqa models pull,
+    # which says what it fetches and where.
+    with pytest.raises(TypeError):
+        whisper.FasterWhisperStt(model="base.en", models_dir=tmp_path / "empty", download=True)
 
 
 def test_models_dir_env_is_used_when_no_dir_is_given(fake_model, monkeypatch):

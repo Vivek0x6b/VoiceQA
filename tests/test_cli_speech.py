@@ -23,6 +23,30 @@ def make_cached_model(cache, name, size):
     return snapshot
 
 
+@pytest.fixture(autouse=True)
+def hide_stt_extra(monkeypatch):
+    """Every test here runs as if faster-whisper were not installed, the way
+    a contributor with only the [dev] extra runs them. Tests that need the
+    extra say so by patching stt_extra_installed."""
+    real_find_spec = model_cache.importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "faster_whisper" or name.startswith("faster_whisper."):
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(model_cache.importlib.util, "find_spec", find_spec)
+
+
+@pytest.fixture
+def stt_extra(monkeypatch):
+    monkeypatch.setattr(model_cache, "stt_extra_installed", lambda: True)
+
+
+def test_the_stt_extra_is_hidden_in_this_module():
+    assert model_cache.stt_extra_installed() is False
+
+
 @pytest.fixture
 def models_env(monkeypatch, tmp_path):
     monkeypatch.setenv("VOICEQA_MODELS_DIR", str(tmp_path))
@@ -80,7 +104,7 @@ def test_models_list_with_nothing_cached(models_env):
     assert "no faster-whisper models" in result.output
 
 
-def test_models_pull_downloads_into_the_models_dir(monkeypatch, models_env):
+def test_models_pull_downloads_into_the_models_dir(monkeypatch, models_env, stt_extra):
     calls = []
 
     def fake_pull(model, models_dir):
@@ -131,7 +155,7 @@ class FakeEngine:
 
 
 @pytest.fixture
-def fake_bench_engine(monkeypatch):
+def fake_bench_engine(monkeypatch, stt_extra):
     built = []
 
     def factory(model, models_dir):

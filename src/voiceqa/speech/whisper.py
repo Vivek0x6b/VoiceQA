@@ -1,8 +1,9 @@
 """faster-whisper speech to text, installed with the [stt] extra.
 
-The model is loaded once, in the constructor. A model that is not on disk
-is an error unless `download=True`, so nothing is fetched in the middle of a
-call; `voiceqa models pull stt <model>` gets it ahead of time.
+The model is loaded once, in the constructor. It never downloads: a model
+that is not on disk is an error, so nothing is fetched in the middle of a
+call. `voiceqa models pull stt <model>` (or `pull_stt_model`) gets it ahead
+of time.
 """
 
 import os
@@ -18,7 +19,7 @@ except ImportError as exc:
 
 from voiceqa.audio.dsp import resample
 
-from .model_cache import ModelNotAvailableError, find_model, pull_stt_model, resolve_models_dir
+from .model_cache import ModelNotAvailableError, find_model, resolve_models_dir
 from .models import Segment, Transcript, Word
 
 DEFAULT_MODEL = "base.en"
@@ -37,7 +38,6 @@ class FasterWhisperStt:
         word_timestamps: bool = True,
         vad_filter: bool = True,
         cpu_threads: int = 0,
-        download: bool = False,
     ) -> None:
         self._model_name = model
         self._language = language
@@ -48,12 +48,10 @@ class FasterWhisperStt:
         cache = resolve_models_dir(models_dir)
         path = find_model(model, cache)
         if path is None:
-            if not download:
-                raise ModelNotAvailableError(
-                    f"faster-whisper model {model} is not in {cache}. "
-                    f"Download it first: voiceqa models pull stt {model}"
-                )
-            path = pull_stt_model(model, cache)
+            raise ModelNotAvailableError(
+                f"faster-whisper model {model} is not in {cache}. "
+                f"Download it first: voiceqa models pull stt {model}"
+            )
         self._model = WhisperModel(
             str(path), device=device, compute_type=compute_type, cpu_threads=cpu_threads
         )
