@@ -13,23 +13,60 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13"]
+    env:
+      # Only tiny.en lives here, so the cache below holds just that model.
+      VOICEQA_MODELS_DIR: ${{ github.workspace }}/.voiceqa/models
+      STT_TEST_MODEL: tiny.en
+      VOICEQA_REQUIRE_MODEL_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev,stt]"
       - run: ruff check .
       - run: ruff format --check .
       - run: python -m pip list
+      - name: faster-whisper version
+        id: fw
+        shell: bash
+        run: echo "version=$(python -c 'import importlib.metadata as m; print(m.version("faster-whisper"))')" >> "$GITHUB_OUTPUT"
+      - name: cache stt test model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: .voiceqa/models
+          key: stt-${{ env.STT_TEST_MODEL }}-fw${{ steps.fw.outputs.version }}-${{ runner.os }}
+      # A no-op when the cache restored the model. On a miss, or if the
+      # restored copy is incomplete, it downloads the model once.
+      - name: make sure the stt test model is present
+        run: voiceqa models pull stt ${{ env.STT_TEST_MODEL }}
       - name: pytest
         shell: bash
         run: |
           set -o pipefail
-          pytest -rfE --tb=short 2>&1 | tee pytest.log
+          pytest -rfEs --tb=short 2>&1 | tee pytest.log
       # Job logs need a login to read, annotations do not.
       - name: report failures
         if: failure()
         shell: bash
         run: grep -E "^(FAILED|ERROR) tests/" pytest.log | sed 's/^/::error::/' || true
+      # Informational only. The numbers never fail the job, only a crash does.
+      - name: bench stt
+        shell: bash
+        run: |
+          set -o pipefail
+          voiceqa bench stt --stt-model ${{ env.STT_TEST_MODEL }} --json | tee bench.json
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json, platform
+          r = json.load(open("bench.json"))
+          print(f"### STT bench: {r['engine']} {r['model']}, {platform.system()} Python {platform.python_version()}")
+          print()
+          print("| model load | real-time factor | utterance median | p95 | max |")
+          print("|---|---|---|---|---|")
+          print(
+              f"| {r['load_seconds']:.2f} s | {r['rtf']:.3f} | {r['utterance_median_ms']:.0f} ms"
+              f" | {r['utterance_p95_ms']:.0f} ms | {r['utterance_max_ms']:.0f} ms |"
+          )
+          EOF
