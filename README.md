@@ -1,8 +1,18 @@
 # VoiceQA
 
-Open-source QA lab for AI voice agents. VoiceQA places real SIP phone calls to your agent, talks to it with local text-to-speech, transcribes the replies with local speech-to-text, and writes JSON and HTML reports covering the transcript, recordings, latency, turn-taking and audio quality.
+A free, offline test framework for AI voice agents. VoiceQA places real SIP phone calls to your agent, talks to it with local text-to-speech, transcribes the replies with local speech-to-text, and checks what came back over the wire: the transcript, recordings, latency, turn-taking and audio quality.
 
 Everything runs on your machine. Nothing is sent to the cloud. The only cost is your own VoIP/SIP provider for the phone line.
+
+## Why VoiceQA
+
+- No API keys. Nothing to sign up for, and VoiceQA never needs one.
+- No cloud. Speech-to-text, text-to-speech and every check run locally. No audio, transcript or result leaves your machine.
+- It measures the real audio. VoiceQA is a SIP caller, so it hears what a phone caller would hear, with the codec, the network and the agent's real timing.
+- Same input, same result. Checks are plain rules (text matches, timings, audio measurements), so a scenario run twice against the same agent behaviour gives the same verdict.
+- The only possible cost is your own phone number or SIP trunk, paid to your provider.
+
+Checks on meaning, such as whether the agent followed its instructions or made something up, are planned as an optional add-on that runs a local model (for example through Ollama). Those results will be marked as probabilistic and kept apart from the rule-based ones.
 
 ## Status
 

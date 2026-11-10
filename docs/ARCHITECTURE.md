@@ -4,14 +4,14 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 
 ## Current status
 
-- Current milestone: M3 (YAML scenario engine). Its issues are not planned yet.
+- Current milestone: M3 (scenario engine). Its issues are not planned yet. The roadmap was revised on 2026-11-10: real-internet SIP is now M4, and audio QA, reports and the local LLM layer move to M5, M6 and M7.
 - Next issue: the first M3 issue, once M3 is planned. Live per-turn STT with VAD end-of-turn detection moves to M3 and reuses the issue 3 worker (`SttWorker`), so speech work still never runs in the media event loop.
 - M2 (local STT and TTS) is done. All five issues are finished: 1 speech interfaces, fakes and WAV prompts; 2 faster-whisper STT backend; 3 call transcripts and `voiceqa transcribe`; 4 OS TTS engines and the plugin runner; 5 loopback check and docs. What M2 gives: `voiceqa say`, `voiceqa call --say/--transcribe`, `voiceqa transcribe`, `voiceqa models pull/list` and `voiceqa bench stt`, with STT behind the `[stt]` extra and TTS from the OS engine, WAV prompts or a subprocess plugin.
 - Finished M2 issues: issue 1, speech interfaces (`Speech`, `TextToSpeech`, `SpeechToText`), the `Word`/`Segment`/`Transcript` models, `WavPromptTts`, `FakeTts`/`FakeStt`, and the `create_tts`/`create_stt` registry. Issue 2, the faster-whisper STT backend behind the `[stt]` extra, `voiceqa models pull/list`, model info in `voiceqa doctor`, the LibriVox test clip, real-model tests in CI with a cached tiny.en, and `voiceqa bench stt`. Issue 3, the STT worker process (`SttWorker`), transcript.json for a run folder, `voiceqa transcribe`, `voiceqa call --transcribe` and the WER helper. The M1 carry-over where `run_call` resolved the SIP server a second time is fixed in the same issue. Issue 4, the OS TTS engines (`SapiTts` on Windows, `SayTts` on macOS), the subprocess plugin runner (`PluginTts`), the per-user TTS cache, `voiceqa say` and `voiceqa call --say`. Issue 5, the speech loopback end-to-end test (`voiceqa agent` echo plus `voiceqa call --say ... --transcribe --stt-model tiny.en` as subprocesses, both transcripts checked against the spoken text with the WER helper, bound 0.35 against a measured 0.0; sapi on Windows, say on macOS, a WAV prompt cut from the LibriVox clip on Linux), the speech setup in the README, and a fix for Rich markup eating "[stt]" in CLI help.
 - M2 known problems:
   - The test clip's reference text is the book's text and was not checked by ear. Both tiny.en and base.en hear "Stella, the in slender" for its first words, "Della, being slender", so the reader may differ from the book there. The real-model WER bounds allow for it.
   - CTranslate2 keeps its worker thread pool alive for the life of the process once a model is loaded (confirmed locally: loading tiny.en adds about twenty OS threads that `del` and `gc.collect()` do not remove, and `unload_model()` does not touch them either). The real-model tests load tiny.en with `cpu_threads=1` to keep that footprint small, since this is real, measured leftover state in the pytest process, not just a theory. Transcription for calls runs in the worker child, so those threads stay there and go away with it.
-  - faster-whisper's word start times are not precise enough to measure latency with: on the test clip, tiny.en puts the first word 0.25 to 0.3 s before the speech after leading silence, and at 0.0 when the speech starts within the first few frames (measured 2026-11-09). Shifts between two placements of the same speech come back exact to within a few hundredths of a second. M4 latency should use energy onsets (`first_loud_frame`), not STT word times.
+  - faster-whisper's word start times are not precise enough to measure latency with: on the test clip, tiny.en puts the first word 0.25 to 0.3 s before the speech after leading silence, and at 0.0 when the speech starts within the first few frames (measured 2026-11-09). Shifts between two placements of the same speech come back exact to within a few hundredths of a second. Latency checks (M3 scenarios, M5 audio QA) should use energy or VAD onsets (`first_loud_frame`), not STT word times.
   - A chunk boundary inside a long track (one every ten minutes) can still cut a word when the quietest frame in the last two seconds is mid-word.
   - The worker child exits on its own within about a second if its parent dies without closing it; there is no test for that path.
   - SAPI starts a new PowerShell for every prompt, which costs about 0.5 to 1 s each time on the dev machine before any speech is made; the cache hides this on reruns, but a first run with many prompts pays it per prompt.
@@ -40,6 +40,8 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 
 ## Decisions
 
+- Positioning: VoiceQA is a free, offline, deterministic, wire-level test framework for AI voice agents. No API key is ever required. No cloud STT, TTS or LLM. The only possible cost is the user's own phone number or SIP trunk, paid to their provider.
+- Meaning-based checks (instruction following, hallucination) will only ever use an optional local model, for example through Ollama. Their results are labelled probabilistic and kept separate from the deterministic results.
 - Python 3.11+, src layout, package name `voiceqa`, built with hatchling.
 - CLI with Typer. Config and data models with Pydantic and PyYAML. Audio math with NumPy.
 - Ruff for linting and formatting, pytest for tests.
@@ -170,8 +172,9 @@ examples/scenarios/
 
 - M1: local SIP call with two-way audio and recording. Done.
 - M2: local STT and TTS. Done.
-- M3: YAML scenario engine.
-- M4: audio QA (latency, turn-taking, audio quality metrics).
-- M5: dashboard for browsing runs and reports.
-- M6: adaptive caller driven by a local LLM.
-- M7: provider adapters and bring-your-own-number.
+- M3: scenario engine. YAML scenarios, a scripted caller, live per-turn STT with VAD, deterministic assertions, run history, JSON and JUnit output, and a scripted test agent.
+- M4: real-internet SIP. NAT handling with rport/received and symmetric RTP, SIP over TCP, REGISTER, and a configurable public address. Goal: call a hosted agent's SIP URI end to end.
+- M5: audio QA. Silence, dead air, dropouts, clipping, barge-in, turn-taking and end-of-turn timing.
+- M6: HTML report and run comparison.
+- M7: optional local LLM layer (adaptive caller, meaning-based checks).
+- M8: more adapters (WebSocket media first), stress runs and repeated-run consistency.
