@@ -53,6 +53,16 @@ def test_wav_prompt_tts_unknown_text_names_it(tmp_path):
         tts.synthesize("goodbye")
 
 
+@pytest.mark.parametrize("content", [["hello.wav", "bye.wav"], "hello.wav"])
+def test_wav_prompt_tts_index_that_is_not_a_mapping_names_the_file(tmp_path, content):
+    index_path = tmp_path / "index.yaml"
+    index_path.write_text(yaml.safe_dump(content), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be a YAML mapping") as caught:
+        WavPromptTts(index_path)
+    assert str(index_path) in str(caught.value)
+
+
 def test_wav_prompt_tts_downmixes_stereo(tmp_path):
     _write_tone(tmp_path / "stereo.wav", rate=8000, channels=2)
     index_path = tmp_path / "index.yaml"

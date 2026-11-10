@@ -7,7 +7,7 @@ import numpy as np
 from voiceqa.audio.dsp import generate_tone
 
 from .interfaces import Speech
-from .models import Transcript
+from .models import Segment, Transcript
 
 
 class FakeTts:
@@ -51,6 +51,9 @@ class FakeStt:
     registry lookup and a spawned worker process. `delay` makes every job
     take that many seconds and `error` makes every job raise RuntimeError
     with that message, for testing the worker with slow or failing jobs.
+    With `echo`, the transcript keeps the scripted engine, model and
+    language but has one segment describing the job ("800 samples at 8000
+    Hz"), so a result that went to the wrong job shows.
     """
 
     def __init__(
@@ -59,10 +62,12 @@ class FakeStt:
         name: str = "fake",
         delay: float = 0.0,
         error: str | None = None,
+        echo: bool = False,
     ) -> None:
         self._name = name
         self._delay = delay
         self._error = error
+        self._echo = echo
         self._transcript = (
             transcript
             if isinstance(transcript, Transcript)
@@ -78,4 +83,8 @@ class FakeStt:
             time.sleep(self._delay)
         if self._error is not None:
             raise RuntimeError(self._error)
+        if self._echo:
+            text = f"{len(samples)} samples at {rate} Hz"
+            segment = Segment(start=0.0, end=len(samples) / rate, text=text)
+            return self._transcript.model_copy(update={"segments": [segment]})
         return self._transcript

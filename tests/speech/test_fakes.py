@@ -75,3 +75,15 @@ def test_fake_stt_error_raises_on_every_job():
     stt = FakeStt(Transcript(engine="fake", model="scripted", language="en"), error="boom")
     with pytest.raises(RuntimeError, match="boom"):
         stt.transcribe(np.zeros(5, dtype=np.int16), 8000)
+
+
+def test_fake_stt_echo_describes_the_job_it_was_given():
+    scripted = Transcript(engine="fake", model="scripted", language="en")
+    stt = FakeStt(scripted.model_dump(), echo=True)
+
+    result = stt.transcribe(np.zeros(4000, dtype=np.int16), 8000)
+
+    assert result.segments == [Segment(start=0.0, end=0.5, text="4000 samples at 8000 Hz")]
+    assert (result.engine, result.model, result.language) == ("fake", "scripted", "en")
+    other = stt.transcribe(np.zeros(160, dtype=np.int16), 16000)
+    assert other.segments[0].text == "160 samples at 16000 Hz"

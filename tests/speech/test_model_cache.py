@@ -6,9 +6,11 @@ import pytest
 from voiceqa.speech import model_cache
 from voiceqa.speech.model_cache import (
     MODELS_DIR_ENV,
+    ModelNotAvailableError,
     cached_models,
     default_hf_cache,
     find_model,
+    is_local_model,
     repo_id,
     resolve_models_dir,
 )
@@ -96,6 +98,41 @@ def test_find_model_accepts_a_local_model_folder(tmp_path):
     folder.mkdir()
     (folder / "model.bin").write_bytes(b"x")
     assert find_model(str(folder), tmp_path / "unused") == folder
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_find_model_names_a_local_folder_that_does_not_exist(tmp_path, monkeypatch, relative):
+    monkeypatch.chdir(tmp_path)
+    typo = "./models/tiny-enn" if relative else str(tmp_path / "models" / "tiny-enn")
+    with pytest.raises(ModelNotAvailableError, match="does not exist") as caught:
+        find_model(typo, tmp_path / "cache")
+    assert typo in str(caught.value)
+    assert "pull" not in str(caught.value)
+
+
+def test_find_model_says_a_local_folder_has_no_model_bin(tmp_path):
+    folder = tmp_path / "my-model"
+    folder.mkdir()
+    with pytest.raises(ModelNotAvailableError, match="no model.bin"):
+        find_model(str(folder), tmp_path / "cache")
+
+
+def test_find_model_still_treats_short_names_and_repo_ids_as_cache_lookups(tmp_path):
+    assert find_model("tiny.en", tmp_path) is None
+    assert find_model("someone/my-whisper-ct2", tmp_path) is None
+    assert not is_local_model("tiny.en")
+    assert not is_local_model("someone/my-whisper-ct2")
+    assert is_local_model("./my-model")
+    assert is_local_model("models/whisper/tiny-ct2")
+    assert is_local_model("models\\tiny-ct2")
+    assert is_local_model(str(tmp_path))
+
+
+def test_find_model_accepts_a_bare_folder_name_in_the_working_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "my-model").mkdir()
+    (tmp_path / "my-model" / "model.bin").write_bytes(b"x")
+    assert find_model("my-model", tmp_path / "cache") == Path("my-model")
 
 
 def test_cached_models_lists_whisper_models_with_size(tmp_path, make_cached_model):

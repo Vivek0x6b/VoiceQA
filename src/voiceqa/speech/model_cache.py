@@ -103,14 +103,32 @@ def _snapshot_with_model(repo_dir: Path) -> Path | None:
     return max(candidates, key=lambda s: (s / "model.bin").stat().st_mtime)
 
 
+def is_local_model(model: str) -> bool:
+    """True when `model` reads as a folder path rather than a short name or
+    a hub repo id ("org/name", exactly one forward slash)."""
+    path = Path(model).expanduser()
+    if (path / "model.bin").is_file():
+        return True
+    return path.is_absolute() or model.startswith(".") or "\\" in model or model.count("/") > 1
+
+
 def find_model(model: str, models_dir: str | os.PathLike | None = None) -> Path | None:
     """The folder holding `model`'s model.bin, or None if it is not on disk.
 
     `model` is a short name (base.en), a hub repo id, or a local folder that
-    already holds a converted model.
+    already holds a converted model. A local folder that does not exist or
+    has no model.bin raises ModelNotAvailableError, since pulling cannot fix
+    it.
     """
-    local = Path(model)
-    if local.is_dir() and (local / "model.bin").is_file():
+    if is_local_model(model):
+        local = Path(model).expanduser()
+        if not local.is_dir():
+            raise ModelNotAvailableError(f"local model folder {model} does not exist")
+        if not (local / "model.bin").is_file():
+            raise ModelNotAvailableError(
+                f"local model folder {model} has no model.bin, so it is not a converted "
+                "faster-whisper model"
+            )
         return local
     org, name = repo_id(model).split("/", 1)
     return _snapshot_with_model(resolve_models_dir(models_dir) / f"models--{org}--{name}")

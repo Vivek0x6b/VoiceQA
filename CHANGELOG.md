@@ -89,3 +89,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - The `[stt]` extra install hint (`pip install voiceqa[stt]`) named a PyPI package VoiceQA is not published as, and the unquoted brackets fail in zsh. It now reads `pip install -e ".[stt]"` from a checkout.
 - `voiceqa say` and `voiceqa call --say` could crash with a traceback instead of a clean error when a WAV prompt file named in the index was missing, or when the output WAV could not be written (for example `-o` into a folder that does not exist). Both now exit 1 with a plain message.
 - `voiceqa transcribe` crashed with a traceback on a corrupt or non-16-bit WAV instead of exiting 1 with a plain message naming the file.
+- STT worker hardening before it is used live during calls. `submit()` racing `close()` now fails the job with `SttWorkerError` instead of raising `ValueError`. A failed `start()` leaves nothing behind and `close()` on it is safe; engine arguments that cannot be pickled are caught before any child is spawned. A result that cannot be read or does not validate fails only its own job, and the reader keeps going. Ctrl+C while the child is still starting up no longer kills it with a traceback. The child runs with `HF_HUB_OFFLINE=1`.
+- `SttWorker.start_async()`, and `async with SttWorker(...)`, spawn the child from a thread so the event loop keeps running. A cancelled start closes the child once it is up.
+- `FakeStt(echo=True)` returns a segment describing the job ("800 samples at 8000 Hz"), so a test can tell when a result went to the wrong job.
+- A faster-whisper model folder without tokenizer.json is now an error naming the file, instead of faster-whisper quietly fetching a tokenizer from the internet.
+- A mistyped local model folder (for `--stt-model` or `voiceqa bench stt`) now says the folder does not exist or has no model.bin, instead of suggesting `voiceqa models pull`. `voiceqa models pull` rejects a folder with exit 2.
+- `voiceqa doctor` no longer crashes when faster-whisper is importable but its package metadata is missing; it says the version is unknown.
+- Test for a WAV prompt index that is not a YAML mapping.

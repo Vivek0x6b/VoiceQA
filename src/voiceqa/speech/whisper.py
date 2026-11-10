@@ -52,6 +52,13 @@ class FasterWhisperStt:
                 f"faster-whisper model {model} is not in {cache}. "
                 f"Download it first: voiceqa models pull stt {model}"
             )
+        # Without it faster-whisper fetches a tokenizer from the hub, which
+        # must never happen during a run.
+        if not (path / "tokenizer.json").is_file():
+            raise ModelNotAvailableError(
+                f"faster-whisper model folder {path} has no tokenizer.json. Copy it in "
+                "from the original model, or delete the folder and pull the model again."
+            )
         self._model = WhisperModel(
             str(path), device=device, compute_type=compute_type, cpu_threads=cpu_threads
         )

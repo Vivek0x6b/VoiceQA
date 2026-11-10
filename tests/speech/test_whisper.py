@@ -38,7 +38,9 @@ class FakeWhisperModel:
 def fake_model(monkeypatch, tmp_path, make_cached_model):
     FakeWhisperModel.instances = []
     monkeypatch.setattr(whisper, "WhisperModel", FakeWhisperModel)
-    snapshot = make_cached_model(tmp_path, "Systran/faster-whisper-tiny.en", {"model.bin": b"x"})
+    snapshot = make_cached_model(
+        tmp_path, "Systran/faster-whisper-tiny.en", {"model.bin": b"x", "tokenizer.json": b"{}"}
+    )
     return SimpleNamespace(models_dir=tmp_path, snapshot=snapshot)
 
 
@@ -135,6 +137,19 @@ def test_the_backend_never_downloads(fake_model, monkeypatch, tmp_path):
     # which says what it fetches and where.
     with pytest.raises(TypeError):
         whisper.FasterWhisperStt(model="base.en", models_dir=tmp_path / "empty", download=True)
+
+
+def test_a_model_without_tokenizer_json_is_an_error_naming_it(fake_model, tmp_path):
+    # faster-whisper would otherwise fetch a tokenizer from the hub, silently.
+    folder = tmp_path / "converted"
+    folder.mkdir()
+    (folder / "model.bin").write_bytes(b"x")
+    with pytest.raises(ModelNotAvailableError, match="tokenizer.json"):
+        whisper.FasterWhisperStt(model=str(folder))
+    (fake_model.snapshot / "tokenizer.json").unlink()
+    with pytest.raises(ModelNotAvailableError, match="tokenizer.json"):
+        whisper.FasterWhisperStt(model="tiny.en", models_dir=fake_model.models_dir)
+    assert FakeWhisperModel.instances == []
 
 
 def test_models_dir_env_is_used_when_no_dir_is_given(fake_model, monkeypatch):

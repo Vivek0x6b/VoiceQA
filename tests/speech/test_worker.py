@@ -7,16 +7,25 @@ left behind.
 """
 
 import asyncio
+import ctypes
 import multiprocessing
 import os
+import pickle
+import queue
 import signal
+import subprocess
+import sys
+import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from voiceqa.audio.wav import read_wav
-from voiceqa.speech import Segment, Transcript
+from voiceqa.speech import FakeStt, Segment, Transcript
+from voiceqa.speech import worker as worker_module
 from voiceqa.speech.bench import default_clip_dir, load_bench_clip
 from voiceqa.speech.wer import wer
 from voiceqa.speech.worker import DEFAULT_CLOSE_TIMEOUT, SttWorker, SttWorkerError
@@ -88,13 +97,21 @@ def test_context_managers_start_and_close(clip):
     assert worker.exitcode == 0
 
 
-def test_jobs_come_back_to_the_job_that_asked():
-    async def main():
-        with fake_worker() as worker:
-            short = np.zeros(800, dtype=np.int16)
-            return await asyncio.gather(*(worker.transcribe(short, 8000) for _ in range(5)))
+def echoed(transcript: Transcript) -> str:
+    return " ".join(s.text for s in transcript.segments)
 
-    assert run(main()) == [SCRIPTED] * 5
+
+def test_jobs_come_back_to_the_job_that_asked():
+    lengths = [800, 2400, 160, 4000, 1200]
+
+    async def main():
+        with fake_worker(echo=True) as worker:
+            jobs = (worker.transcribe(np.zeros(n, dtype=np.int16), 8000) for n in lengths)
+            return await asyncio.gather(*jobs)
+
+    results = run(main())
+
+    assert [echoed(r) for r in results] == [f"{n} samples at 8000 Hz" for n in lengths]
 
 
 def test_close_lets_queued_jobs_finish_within_the_timeout(clip):
@@ -205,6 +222,361 @@ def test_submit_needs_a_started_open_worker(clip):
     worker.close()
     with pytest.raises(SttWorkerError, match="closed"):
         worker.submit(*clip)
+
+
+def test_submit_racing_close_fails_the_job_not_the_caller(clip):
+    worker = fake_worker().start()
+    run(worker.wait_ready())
+    real_put = worker._jobs.put
+
+    def put(item):
+        # Let close() run in full between submit's closed check and the
+        # put, whenever submit leaves that gap open.
+        if item is not None and worker._lock.acquire(blocking=False):
+            worker._lock.release()
+            worker.close()
+        real_put(item)
+
+    worker._jobs.put = put
+    try:
+        job = worker.submit(*clip)
+    finally:
+        worker.close()
+
+    try:
+        assert job.result(timeout=WAIT) == SCRIPTED
+    except SttWorkerError as exc:
+        assert "closed" in str(exc)
+
+
+def test_engine_arguments_that_cannot_be_pickled_fail_start_cleanly(clip):
+    worker = SttWorker("fake", transcript=SCRIPTED.model_dump(), lock=threading.Lock())
+    with pytest.raises(SttWorkerError, match="could not start.*pickl"):
+        worker.start()
+
+    worker.close()
+    assert worker.pid is None
+    assert not worker.is_alive()
+    with pytest.raises(SttWorkerError, match="not started"):
+        worker.submit(*clip)
+
+
+def test_a_spawn_that_fails_leaves_nothing_behind(monkeypatch, clip):
+    def no_spawn(self):
+        raise OSError("no more processes")
+
+    monkeypatch.setattr(multiprocessing.context.SpawnProcess, "start", no_spawn)
+    worker = fake_worker()
+    with pytest.raises(SttWorkerError, match="could not start.*no more processes"):
+        worker.start()
+
+    worker.close()
+    assert worker.pid is None
+    with pytest.raises(SttWorkerError, match="not started"):
+        worker.submit(*clip)
+
+    monkeypatch.undo()
+    # Nothing half-built is left in the way of a second try.
+    with worker:
+        assert run(worker.transcribe(*clip)) == SCRIPTED
+
+
+def test_an_unreadable_result_fails_only_its_job(monkeypatch):
+    real_loads = pickle.loads
+    garbled = []
+
+    def loads(data):
+        message = real_loads(data)
+        if message[0] == "done" and not garbled:
+            garbled.append(message)
+            raise pickle.UnpicklingError("garbled message")
+        return message
+
+    monkeypatch.setattr(worker_module, "pickle", SimpleNamespace(loads=loads, dumps=pickle.dumps))
+    with fake_worker(echo=True) as worker:
+        first = worker.submit(np.zeros(800, dtype=np.int16), 8000)
+        second = worker.submit(np.zeros(1600, dtype=np.int16), 8000)
+        with pytest.raises(SttWorkerError, match="garbled message"):
+            first.result(timeout=WAIT)
+        assert echoed(second.result(timeout=WAIT)) == "1600 samples at 8000 Hz"
+        assert worker.is_alive()
+    assert worker.exitcode == 0
+
+
+def test_an_unreadable_load_answer_fails_ready_and_jobs(monkeypatch, clip):
+    real_loads = pickle.loads
+
+    def loads(data):
+        message = real_loads(data)
+        if message[0] == "ready":
+            raise pickle.UnpicklingError("garbled ready")
+        return message
+
+    monkeypatch.setattr(worker_module, "pickle", SimpleNamespace(loads=loads, dumps=pickle.dumps))
+    with fake_worker() as worker:
+        with pytest.raises(SttWorkerError, match="garbled ready"):
+            run(worker.wait_ready())
+        with pytest.raises(SttWorkerError, match="garbled ready"):
+            worker.submit(*clip).result(timeout=0)
+
+
+def test_a_result_that_does_not_validate_fails_only_its_job(monkeypatch):
+    rejected = []
+
+    class StrictTranscript:
+        @staticmethod
+        def model_validate(data):
+            if not rejected:
+                rejected.append(data)
+                raise ValueError("not a transcript")
+            return Transcript.model_validate(data)
+
+    monkeypatch.setattr(worker_module, "Transcript", StrictTranscript)
+    with fake_worker(echo=True) as worker:
+        first = worker.submit(np.zeros(800, dtype=np.int16), 8000)
+        second = worker.submit(np.zeros(1600, dtype=np.int16), 8000)
+        with pytest.raises(SttWorkerError, match="not a transcript"):
+            first.result(timeout=WAIT)
+        assert echoed(second.result(timeout=WAIT)) == "1600 samples at 8000 Hz"
+    assert worker.exitcode == 0
+
+
+ORPHAN_PARENT = """
+import asyncio, time
+from voiceqa.speech.worker import SttWorker
+worker = SttWorker("fake", transcript={transcript!r}).start()
+asyncio.run(asyncio.wait_for(worker.wait_ready(), 60))
+print(worker.pid, flush=True)
+time.sleep(600)
+"""
+
+_SYNCHRONIZE = 0x00100000
+
+
+def _open_process(pid: int):
+    """A handle that keeps `pid` meaning this process (Windows only)."""
+    if sys.platform != "win32":
+        return None
+    handle = ctypes.windll.kernel32.OpenProcess(_SYNCHRONIZE, False, pid)
+    assert handle, f"cannot open process {pid}"
+    return handle
+
+
+def _process_gone(pid: int, handle, wait: float) -> bool:
+    if handle is not None:
+        return ctypes.windll.kernel32.WaitForSingleObject(handle, int(wait * 1000)) == 0
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        stat = Path(f"/proc/{pid}/stat")
+        # An exited child waiting to be reaped by its new parent.
+        if stat.exists() and stat.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_the_child_exits_when_its_parent_is_killed():
+    code = ORPHAN_PARENT.format(transcript=SCRIPTED.model_dump())
+    parent = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    handle = None
+    try:
+        line = parent.stdout.readline()
+        assert line.strip().isdigit(), f"parent did not report a worker pid: {line!r}"
+        pid = int(line)
+        handle = _open_process(pid)
+        parent.kill()
+        parent.wait(WAIT)
+        # The child checks on its parent about once a second; the bound only
+        # stops a broken guard from hanging the run.
+        gone = _process_gone(pid, handle, 60)
+        if not gone:
+            os.kill(pid, signal.SIGTERM)
+        assert gone, "the worker child outlived its parent"
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(WAIT)
+        parent.stdout.close()
+        if handle is not None:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals; Windows test below")
+def test_ctrl_c_while_the_child_starts_up_is_ignored(capfd):
+    worker = fake_worker().start()
+
+    # Ctrl+C over and over from spawn until the engine is loaded, so some
+    # land while the child is still in Python's start-up.
+    async def main():
+        ready = asyncio.ensure_future(worker.wait_ready())
+        while not ready.done():
+            os.kill(worker.pid, signal.SIGINT)
+            await asyncio.sleep(0.05)
+        await ready
+
+    try:
+        run(main())
+    finally:
+        worker.close()
+
+    assert worker.exitcode == 0
+    assert "KeyboardInterrupt" not in capfd.readouterr().err
+
+
+CTRL_C_PARENT = """
+import asyncio, ctypes, signal
+from voiceqa.speech.worker import SttWorker
+kernel32 = ctypes.windll.kernel32
+# This process may have inherited "ignore Ctrl+C" from whatever started the
+# test run, which would hide the problem. Turn Ctrl+C back on, then ignore it
+# here in the parent through Python only, which a child does not inherit.
+kernel32.SetConsoleCtrlHandler(None, False)
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+async def main():
+    worker = SttWorker("fake", transcript={transcript!r}).start()
+    ready = asyncio.ensure_future(worker.wait_ready())
+    while not ready.done():
+        kernel32.GenerateConsoleCtrlEvent(0, 0)
+        await asyncio.sleep(0.05)
+    await ready
+    return worker
+
+worker = asyncio.run(asyncio.wait_for(main(), 60))
+worker.close()
+print("exitcode", worker.exitcode, flush=True)
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows console Ctrl+C")
+def test_ctrl_c_while_the_child_starts_up_is_ignored_on_windows():
+    # A console of its own, so the Ctrl+C reaches only that parent and its
+    # worker, not pytest.
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    result = subprocess.run(
+        [sys.executable, "-c", CTRL_C_PARENT.format(transcript=SCRIPTED.model_dump())],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        startupinfo=startup,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "exitcode 0" in result.stdout
+    assert "KeyboardInterrupt" not in result.stderr
+
+
+def test_async_with_starts_the_child_off_the_event_loop(clip):
+    started_on = []
+
+    class Recording(SttWorker):
+        def start(self):
+            started_on.append(threading.current_thread())
+            return super().start()
+
+    async def main():
+        async with Recording("fake", transcript=SCRIPTED.model_dump()) as worker:
+            return threading.current_thread(), await worker.transcribe(*clip)
+
+    loop_thread, result = run(main())
+
+    assert result == SCRIPTED
+    assert len(started_on) == 1
+    assert started_on[0] is not loop_thread
+
+
+def test_a_cancelled_start_async_stops_the_child_once_it_is_up():
+    entered = threading.Event()
+    go = threading.Event()
+
+    class Slow(SttWorker):
+        def start(self):
+            entered.set()
+            go.wait(WAIT)
+            return super().start()
+
+    worker = Slow("fake", transcript=SCRIPTED.model_dump())
+
+    async def main():
+        task = asyncio.create_task(worker.start_async())
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        go.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    run(main())
+
+    deadline = time.monotonic() + WAIT
+    while worker.exitcode is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert worker.exitcode is not None
+    assert not worker.is_alive()
+
+
+def test_a_start_async_cancelled_before_its_thread_runs_starts_nothing(monkeypatch):
+    held = []
+
+    class HeldThread(threading.Thread):
+        def start(self):
+            held.append(self)
+
+    started = []
+
+    class Recording(SttWorker):
+        def start(self):
+            started.append(self)
+            return super().start()
+
+    monkeypatch.setattr(
+        worker_module, "threading", SimpleNamespace(Thread=HeldThread, Lock=threading.Lock)
+    )
+    worker = Recording("fake", transcript=SCRIPTED.model_dump())
+
+    async def main():
+        task = asyncio.create_task(worker.start_async())
+        while not held:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    run(main())
+    threading.Thread.start(held[0])
+    held[0].join(WAIT)
+
+    assert started == []
+    assert worker.pid is None
+
+
+def test_the_child_never_reaches_the_hugging_face_hub(monkeypatch):
+    # _serve runs here in the test process so the engine can report the
+    # environment it was built in.
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(worker_module.signal, "signal", lambda *args: None)
+    seen = []
+
+    def create(name, **kwargs):
+        seen.append(os.environ.get("HF_HUB_OFFLINE"))
+        return FakeStt(**kwargs)
+
+    monkeypatch.setattr(worker_module, "create_stt", create)
+    jobs = queue.Queue()
+    jobs.put(None)
+    results, child_end = multiprocessing.Pipe(duplex=False)
+
+    worker_module._serve("fake", {"transcript": SCRIPTED.model_dump()}, jobs, child_end)
+
+    assert seen == ["1"]
+    assert results.recv() == ("ready", None, None)
 
 
 @pytest.mark.model

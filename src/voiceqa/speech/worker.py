@@ -5,25 +5,33 @@ builds the engine there from its registry name and plain keyword arguments
 (see voiceqa.speech.registry), loads it once, and then transcribes jobs one
 at a time. Speech work never runs in the process or event loop that handles
 media, and whatever the engine leaves behind (CTranslate2 keeps its thread
-pool for the life of the process) stays in the child.
+pool for the life of the process) stays in the child. The child runs with
+HF_HUB_OFFLINE=1, so nothing in it can fetch from the Hugging Face hub.
 
 Jobs go to the child over a multiprocessing queue as (job id, samples,
 rate). Results come back over a pipe as plain data and are matched to the
 job's future by a reader thread in this process, so nothing here blocks an
 event loop. If the child dies, every pending job fails with SttWorkerError
-instead of waiting forever.
+instead of waiting forever. A result that cannot be read fails only its
+own job.
 
     async with SttWorker("faster-whisper", model="base.en") as worker:
         transcript = await worker.transcribe(samples, 8000)
 
-M3 reuses this for live per-turn transcription during calls.
+`async with` (or start_async()) spawns the child from a thread, so the
+event loop keeps running meanwhile. M3 reuses this for live per-turn
+transcription during calls.
 """
 
 import asyncio
+import contextlib
 import itertools
 import multiprocessing
+import os
+import pickle
 import queue
 import signal
+import sys
 import threading
 from concurrent.futures import Future, InvalidStateError
 from multiprocessing.connection import Connection, wait
@@ -40,6 +48,8 @@ _STOP_WAIT = 5.0
 # How often an idle child checks that its parent is still there.
 _PARENT_CHECK = 1.0
 
+_console_lock = threading.Lock()
+
 
 class SttWorkerError(RuntimeError):
     """A job could not be transcribed: the engine failed to load, the engine
@@ -50,10 +60,47 @@ def _describe(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
 
 
+@contextlib.contextmanager
+def _children_ignore_ctrl_c():
+    """Processes started inside this block ignore Ctrl+C from their first
+    instruction. _serve ignores it for good once it runs; before that, a
+    Ctrl+C would stop the child in its start-up with a traceback."""
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        # The "ignore Ctrl+C" flag is per process and new processes copy it.
+        # Windows has no call to read it, so afterwards it is always turned
+        # back off, even in a process that had inherited it.
+        with _console_lock:
+            ignoring = kernel32.SetConsoleCtrlHandler(None, True)
+            try:
+                yield
+            finally:
+                if ignoring:
+                    kernel32.SetConsoleCtrlHandler(None, False)
+    else:
+        # A blocked signal stays blocked across exec. Only this thread's mask
+        # changes, so a Ctrl+C meanwhile still reaches this process.
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            yield
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
+
+
 def _serve(engine: str, engine_kwargs: dict, jobs, results: Connection) -> None:
     # Ctrl+C reaches every process in the console group. The parent decides
     # when the worker stops, through close().
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if sys.platform != "win32":
+        # Blocked since spawn (see _children_ignore_ctrl_c). A Ctrl+C that
+        # came during start-up is pending and is dropped here, now that
+        # SIGINT is ignored.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+    # huggingface_hub reads this once, on import, which happens below when
+    # the engine is built.
+    os.environ["HF_HUB_OFFLINE"] = "1"
     try:
         stt = create_stt(engine, **engine_kwargs)
     except Exception as exc:
@@ -89,6 +136,7 @@ class SttWorker:
         self._results: Connection | None = None
         self._reader: threading.Thread | None = None
         self._ready: Future[None] = Future()
+        self._load_answered = False
         self._pending: dict[int, Future[Transcript]] = {}
         self._lock = threading.Lock()
         self._ids = itertools.count()
@@ -97,26 +145,77 @@ class SttWorker:
         self._closed = False
 
     def start(self) -> "SttWorker":
+        """Spawn the child. Raises SttWorkerError, leaving nothing running,
+        if it cannot be started (for example an engine argument that cannot
+        be pickled)."""
         if self._process is not None:
             raise SttWorkerError("STT worker already started")
+        # Checked before any child exists. On Windows, Process.start() creates
+        # the child first and pickles after; when that fails, the stray child
+        # can later close a handle in this process that has been reused.
+        try:
+            pickle.dumps((self._engine, self._engine_kwargs))
+        except Exception as exc:
+            raise SttWorkerError(
+                "could not start the STT worker: engine arguments must be plain, "
+                f"picklable data: {_describe(exc)}"
+            ) from exc
         ctx = multiprocessing.get_context("spawn")
-        self._jobs = ctx.Queue()
-        self._results, child_end = ctx.Pipe(duplex=False)
-        self._process = ctx.Process(
+        jobs = ctx.Queue()
+        results, child_end = ctx.Pipe(duplex=False)
+        process = ctx.Process(
             target=_serve,
-            args=(self._engine, self._engine_kwargs, self._jobs, child_end),
+            args=(self._engine, self._engine_kwargs, jobs, child_end),
             name=f"voiceqa-stt-{self._engine}",
             daemon=True,
         )
-        self._process.start()
-        # Without our copy of the child's end, the pipe reads as closed as
-        # soon as the child exits.
-        child_end.close()
+        try:
+            with _children_ignore_ctrl_c():
+                process.start()
+        except BaseException as exc:
+            jobs.cancel_join_thread()
+            jobs.close()
+            results.close()
+            if isinstance(exc, Exception):
+                raise SttWorkerError(f"could not start the STT worker: {_describe(exc)}") from exc
+            raise
+        finally:
+            # Without our copy of the child's end, the pipe reads as closed as
+            # soon as the child exits.
+            child_end.close()
+        self._jobs, self._results, self._process = jobs, results, process
         self._reader = threading.Thread(
             target=self._read_results, name="voiceqa-stt-results", daemon=True
         )
         self._reader.start()
         return self
+
+    async def start_async(self) -> "SttWorker":
+        """start() without blocking the event loop: the spawn runs in a
+        thread. If this is cancelled, the child is closed once it is up."""
+        started: Future[SttWorker] = Future()
+
+        def run() -> None:
+            # Cancelled before this thread got going: nothing to start.
+            if not started.set_running_or_notify_cancel():
+                return
+            try:
+                started.set_result(self.start())
+            except BaseException as exc:
+                started.set_exception(exc)
+
+        threading.Thread(target=run, name="voiceqa-stt-start", daemon=True).start()
+        try:
+            return await asyncio.wrap_future(started)
+        except asyncio.CancelledError:
+            # The spawn cannot be stopped half way. This runs in the start
+            # thread once it is done, or here at once if it already is.
+            started.add_done_callback(self._close_once_started)
+            raise
+
+    def _close_once_started(self, started: "Future[SttWorker]") -> None:
+        if not started.cancelled() and started.exception() is None:
+            self.close(0)
 
     @property
     def pid(self) -> int | None:
@@ -150,7 +249,10 @@ class SttWorker:
                 return future
             job_id = next(self._ids)
             self._pending[job_id] = future
-        self._jobs.put((job_id, samples, rate))
+            # Under the lock, so close() cannot close the queue between the
+            # check above and this put. The queue is unbounded: put never
+            # waits.
+            self._jobs.put((job_id, samples, rate))
         return future
 
     async def transcribe(self, samples: np.ndarray, rate: int) -> Transcript:
@@ -166,7 +268,8 @@ class SttWorker:
     def close(self, timeout: float = DEFAULT_CLOSE_TIMEOUT) -> None:
         """Stop the child. Jobs already queued may finish within `timeout`
         seconds; after that the child is terminated and the jobs still
-        pending fail with SttWorkerError. Safe to call more than once."""
+        pending fail with SttWorkerError. Safe to call more than once, and
+        on a worker that never started."""
         with self._lock:
             if self._process is None or self._closed:
                 return
@@ -200,7 +303,7 @@ class SttWorker:
         self.close(DEFAULT_CLOSE_TIMEOUT if exc_type is None else 0)
 
     async def __aenter__(self) -> "SttWorker":
-        return self.start()
+        return await self.start_async()
 
     async def __aexit__(self, exc_type: object, *exc: object) -> None:
         await self.aclose(DEFAULT_CLOSE_TIMEOUT if exc_type is None else 0)
@@ -215,10 +318,15 @@ class SttWorker:
         try:
             while conn in wait([conn, self._process.sentinel]):
                 try:
-                    kind, job_id, payload = conn.recv()
+                    data = conn.recv_bytes()
                 except (EOFError, OSError):
                     break
-                self._handle(kind, job_id, payload)
+                try:
+                    kind, job_id, payload = pickle.loads(data)
+                except Exception as exc:
+                    self._unreadable(exc)
+                else:
+                    self._handle(kind, job_id, payload)
         finally:
             with self._lock:
                 self._ended = True
@@ -230,22 +338,47 @@ class SttWorker:
 
     def _handle(self, kind: str, job_id: int | None, payload: object) -> None:
         if kind == "ready":
+            self._load_answered = True
             _resolve(self._ready, result=None)
             return
         if kind == "failed":
-            error = SttWorkerError(payload)
-            with self._lock:
-                self._load_error = error
-            _resolve(self._ready, exception=error)
+            self._load_answered = True
+            self._fail_load(SttWorkerError(payload))
             return
         with self._lock:
             future = self._pending.pop(job_id, None)
         if future is None:
             return
-        if kind == "done":
-            _resolve(future, result=Transcript.model_validate(payload))
-        else:
+        if kind != "done":
             _resolve(future, exception=SttWorkerError(payload))
+            return
+        try:
+            transcript = Transcript.model_validate(payload)
+        except Exception as exc:
+            error = SttWorkerError(f"STT worker sent a bad transcript: {_describe(exc)}")
+            _resolve(future, exception=error)
+        else:
+            _resolve(future, result=transcript)
+
+    def _unreadable(self, exc: Exception) -> None:
+        error = SttWorkerError(f"unreadable message from the STT worker: {_describe(exc)}")
+        if not self._load_answered:
+            # The child's first message always says whether the engine loaded.
+            self._load_answered = True
+            self._fail_load(error)
+            return
+        # The child answers jobs one at a time in the order they were sent,
+        # so this was the result for the oldest job still pending.
+        with self._lock:
+            if not self._pending:
+                return
+            future = self._pending.pop(min(self._pending))
+        _resolve(future, exception=error)
+
+    def _fail_load(self, error: SttWorkerError) -> None:
+        with self._lock:
+            self._load_error = error
+        _resolve(self._ready, exception=error)
 
 
 def _resolve(future: Future, result: object = None, exception: BaseException | None = None):

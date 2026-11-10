@@ -66,6 +66,19 @@ def test_doctor_reports_the_stt_extra_installed(monkeypatch, models_env):
     assert "stt extra:     installed (faster-whisper 9.9.9)" in result.output
 
 
+def test_doctor_survives_a_faster_whisper_without_package_metadata(monkeypatch, models_env):
+    from importlib import metadata
+
+    def no_metadata(name):
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(model_cache, "stt_extra_installed", lambda: True)
+    monkeypatch.setattr(metadata, "version", no_metadata)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "stt extra:     installed (faster-whisper, version unknown" in result.output
+
+
 def test_doctor_reports_the_stt_extra_missing(monkeypatch, models_env):
     monkeypatch.setattr(model_cache, "stt_extra_installed", lambda: False)
     result = runner.invoke(app, ["doctor"])
@@ -147,6 +160,12 @@ def test_models_pull_rejects_an_unknown_model(models_env):
     result = runner.invoke(app, ["models", "pull", "stt", "enormous.en"])
     assert result.exit_code == 2
     assert "base.en" in result.output
+
+
+def test_models_pull_rejects_a_local_folder(tmp_path, models_env):
+    result = runner.invoke(app, ["models", "pull", "stt", str(tmp_path / "my-model")])
+    assert result.exit_code == 2
+    assert "not a local folder" in plain(result.output)
 
 
 def test_models_pull_only_knows_stt(models_env):
@@ -283,6 +302,37 @@ def test_transcribe_without_the_model_names_the_pull_command(tmp_path, models_en
     assert result.exit_code == 1
     assert "voiceqa models pull stt tiny.en" in plain(result.output)
     assert not (run_dir / "transcript.json").exists()
+
+
+def test_transcribe_with_a_mistyped_model_folder_names_it(tmp_path, models_env, stt_extra):
+    run_dir = make_run_dir(tmp_path / "run")
+    typo = str(tmp_path / "models" / "tiny-enn")
+    result = runner.invoke(app, ["transcribe", str(run_dir), "--stt-model", typo])
+    assert result.exit_code == 1
+    output = plain(result.output)
+    assert "does not exist" in output
+    assert "models pull" not in output
+
+
+def test_bench_stt_with_a_mistyped_model_folder_names_it(tmp_path, models_env, stt_extra):
+    typo = str(tmp_path / "models" / "tiny-enn")
+    result = runner.invoke(app, ["bench", "stt", "--stt-model", typo])
+    assert result.exit_code == 1
+    assert "does not exist" in plain(result.output)
+
+
+def test_bench_stt_with_a_model_that_will_not_load_names_the_problem(
+    monkeypatch, models_env, stt_extra
+):
+    make_cached_model(models_env, "tiny.en", 5)
+
+    def no_tokenizer(model, models_dir):
+        raise model_cache.ModelNotAvailableError("model folder has no tokenizer.json")
+
+    monkeypatch.setattr(cli, "_bench_engine", no_tokenizer)
+    result = runner.invoke(app, ["bench", "stt", "--stt-model", "tiny.en"])
+    assert result.exit_code == 1
+    assert "no tokenizer.json" in plain(result.output)
 
 
 def test_transcribe_a_folder_without_recordings(tmp_path, fake_worker, models_env):

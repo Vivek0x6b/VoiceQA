@@ -29,6 +29,7 @@ from voiceqa.speech.model_cache import (
     SttExtraMissingError,
     cached_models,
     find_model,
+    is_local_model,
     models_dir_source,
     pull_stt_model,
     repo_id,
@@ -80,10 +81,15 @@ def version() -> None:
     typer.echo(f"voiceqa {__version__}")
 
 
-def _faster_whisper_version() -> str:
-    from importlib.metadata import version as dist_version
+def _faster_whisper_version() -> str | None:
+    from importlib.metadata import PackageNotFoundError, version
 
-    return dist_version("faster-whisper")
+    # The module can be importable while its package metadata is gone, after
+    # a broken install or a copy into site-packages.
+    try:
+        return version("faster-whisper")
+    except PackageNotFoundError:
+        return None
 
 
 def _size(size_bytes: int) -> str:
@@ -111,7 +117,12 @@ def doctor(models_dir: ModelsDirOption = None) -> None:
     ffmpeg = shutil.which("ffmpeg")
     typer.echo(f"ffmpeg: found ({ffmpeg})" if ffmpeg else "ffmpeg: not found")
     if model_cache.stt_extra_installed():
-        _doctor_line("stt extra:", f"installed (faster-whisper {_faster_whisper_version()})")
+        fw_version = _faster_whisper_version()
+        if fw_version is None:
+            fw_version = ", version unknown: no package metadata, try reinstalling"
+        else:
+            fw_version = f" {fw_version}"
+        _doctor_line("stt extra:", f"installed (faster-whisper{fw_version})")
     else:
         _doctor_line("stt extra:", f"not installed ({model_cache.STT_EXTRA_HINT})")
     _echo_models_dir(models_dir)
@@ -134,6 +145,9 @@ def models_list(models_dir: ModelsDirOption = None) -> None:
 
 
 def _check_model_name(model: str) -> None:
+    # A folder is checked where it is used, by find_model.
+    if is_local_model(model):
+        return
     try:
         repo_id(model)
     except ValueError as exc:
@@ -164,6 +178,13 @@ def models_pull(
     models_dir: ModelsDirOption = None,
 ) -> None:
     """Download a model now, so nothing is downloaded later during a run."""
+    if is_local_model(model):
+        typer.echo(
+            f"error: {model} looks like a folder. Give a model name or hub repo id, "
+            "not a local folder.",
+            err=True,
+        )
+        raise typer.Exit(2)
     _check_model_name(model)
     existing = find_model(model, resolve_models_dir(models_dir))
     if existing is not None:
@@ -207,17 +228,26 @@ def bench_stt(
         )
         raise typer.Exit(1)
     directory = resolve_models_dir(models_dir)
-    if find_model(stt_model, directory) is None:
+    try:
+        found = find_model(stt_model, directory)
+    except ModelNotAvailableError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    if found is None:
         typer.echo(_download_message(stt_model, models_dir), err=True)
         _pull(stt_model, models_dir)
 
     clip = load_bench_clip(default_clip_dir())
-    result = run_stt_bench(
-        lambda: _bench_engine(stt_model, directory),
-        clip,
-        engine_name="faster-whisper",
-        model=stt_model,
-    )
+    try:
+        result = run_stt_bench(
+            lambda: _bench_engine(stt_model, directory),
+            clip,
+            engine_name="faster-whisper",
+            model=stt_model,
+        )
+    except ModelNotAvailableError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
     if as_json:
         typer.echo(result.model_dump_json(indent=2))
         return
