@@ -18,9 +18,13 @@ import time
 
 import numpy as np
 import pytest
+import yaml
 
 from voiceqa.audio.analysis import first_loud_frame
-from voiceqa.audio.wav import read_wav
+from voiceqa.audio.wav import read_wav, write_wav
+from voiceqa.speech.bench import default_clip_dir, load_bench_clip
+from voiceqa.speech.models import Transcript
+from voiceqa.speech.wer import wer
 from voiceqa.telephony.media import SAMPLE_RATE
 
 AGENT_START_TIMEOUT = 15.0
@@ -157,3 +161,77 @@ def test_call_against_the_agent_subprocess_end_to_end(tmp_path):
     latency_match = re.search(r"first audio\s+([\d.]+) s after answer", result.stdout)
     assert latency_match is not None, result.stdout
     assert float(latency_match.group(1)) < 1.5
+
+
+# Spoken by the OS engine on Windows (sapi) and macOS (say).
+OS_TTS_TEXT = "Hello, this is a test of the local voice lab. Please repeat after me."
+# The LibriVox utterance used as a WAV prompt on Linux, which has no OS engine.
+PROMPT_UTTERANCE = 1
+TRANSCRIBE_CALL_TIMEOUT = 180.0
+# Measured with tiny.en on Windows: 0.0 on both sides for sapi and for this
+# WAV prompt. The bound allows 3 wrong words in the 11-word prompt and 5 in
+# the OS sentence, for other voices and CPUs, and still fails when a side
+# is missing, silent or garbled.
+MAX_WER = 0.35
+
+
+def _speech_args(tmp_path) -> tuple[list[str], str]:
+    """The voiceqa call options that make the caller speak, and the text spoken."""
+    if sys.platform == "win32":
+        return ["--say", OS_TTS_TEXT, "--tts", "sapi"], OS_TTS_TEXT
+    if sys.platform == "darwin":
+        return ["--say", OS_TTS_TEXT, "--tts", "say"], OS_TTS_TEXT
+    clip = load_bench_clip(default_clip_dir())
+    u = clip.utterances[PROMPT_UTTERANCE]
+    speech = clip.samples[round(u.start * clip.rate) : round(u.end * clip.rate)]
+    write_wav(tmp_path / "prompt.wav", speech, clip.rate)
+    index = tmp_path / "prompts.yaml"
+    index.write_text(yaml.safe_dump({u.text: "prompt.wav"}), encoding="utf-8")
+    return ["--say", u.text, "--tts", "wav", "--prompts", str(index)], u.text
+
+
+@pytest.mark.model
+def test_spoken_call_to_the_echo_agent_is_transcribed_on_both_sides(test_model, tmp_path):
+    say_args, text = _speech_args(tmp_path)
+    env = _subprocess_env()
+    # A fresh TTS cache, so the OS engine really runs.
+    env["VOICEQA_CACHE_DIR"] = str(tmp_path / "cache")
+    record_dir = tmp_path / "run"
+    agent_proc, port = _start_agent()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "voiceqa",
+                "call",
+                f"sip:agent@127.0.0.1:{port}",
+                *say_args,
+                "--duration",
+                "8",
+                "--record-dir",
+                str(record_dir),
+                "--transcribe",
+                "--stt-model",
+                test_model,
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=TRANSCRIBE_CALL_TIMEOUT,
+        )
+    finally:
+        agent_proc.kill()
+        agent_proc.wait(timeout=5)
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "answered      yes" in result.stdout, output
+    transcript_path = record_dir / "transcript.json"
+    assert transcript_path.is_file(), output
+
+    transcript = Transcript.model_validate_json(transcript_path.read_text(encoding="utf-8"))
+    for speaker in ("caller", "agent"):
+        heard = " ".join(s.text for s in transcript.segments if s.speaker == speaker)
+        assert heard, f"no {speaker} segments: {transcript.model_dump_json()}"
+        assert wer(text, heard) <= MAX_WER, f"{speaker} heard {heard!r}, said {text!r}"
