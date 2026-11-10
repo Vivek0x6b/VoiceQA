@@ -169,7 +169,7 @@ OS_TTS_TEXT = "Hello, this is a test of the local voice lab. Please repeat after
 PROMPT_UTTERANCE = 1
 TRANSCRIBE_CALL_TIMEOUT = 180.0
 # Measured with tiny.en on Windows: 0.0 on both sides for sapi and for this
-# WAV prompt. The bound allows 3 wrong words in the 11-word prompt and 5 in
+# WAV prompt. The bound allows 3 wrong words in the 11-word prompt and 4 in
 # the OS sentence, for other voices and CPUs, and still fails when a side
 # is missing, silent or garbled.
 MAX_WER = 0.35

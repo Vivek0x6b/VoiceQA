@@ -69,8 +69,9 @@ def test_call_help_shows_the_stt_extra_name():
     result = runner.invoke(app, ["call", "--help"])
     assert result.exit_code == 0
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
-    # Once in the --transcribe help and once in the command description.
-    assert plain.count("[stt]") == 2
+    description, _, options = plain.partition("Options")
+    assert "[stt]" in description, "the command description should name the [stt] extra"
+    assert "[stt]" in options, "the --transcribe option should name the [stt] extra"
 
 
 def _commands(command, path=()):
