@@ -9,6 +9,7 @@ import pytest
 
 from voiceqa.speech.os_tts import OUTPUT_RATE, SapiTts, SayTts, parse_say_voices
 from voiceqa.speech.registry import create_tts
+from voiceqa.speech.tts_cache import CachedTts
 from voiceqa.speech.tts_process import TtsError
 
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="SAPI is Windows only")
@@ -112,14 +113,26 @@ def fake_say(monkeypatch):
     from voiceqa.audio.wav import write_wav
     from voiceqa.speech import os_tts
 
-    calls = []
+    class Calls(list):
+        """`durations` holds what each synthesis writes, used up in order:
+        seconds of tone, or (seconds, amplitude). 0 writes a WAV with no
+        samples. When it is empty, every synthesis writes 0.2 s."""
+
+        def __init__(self):
+            super().__init__()
+            self.durations = []
+
+    calls = Calls()
 
     def run(args, *, label, stdin=b"", timeout=0, env=None):
         calls.append(list(args))
         if args[1:] == ["-v", "?"]:
             return SAY_VOICES_OUTPUT
         out = args[args.index("-o") + 1]
-        write_wav(out, generate_tone(300, 0.2, sample_rate=OUTPUT_RATE), OUTPUT_RATE)
+        item = calls.durations.pop(0) if calls.durations else 0.2
+        seconds, amplitude = item if isinstance(item, tuple) else (item, 0.5)
+        tone = generate_tone(300, seconds, sample_rate=OUTPUT_RATE, amplitude=amplitude)
+        write_wav(out, tone, OUTPUT_RATE)
         return b""
 
     monkeypatch.setattr(sys, "platform", "darwin")
@@ -153,6 +166,45 @@ def test_say_without_a_voice_skips_the_voice_list(fake_say):
     SayTts().synthesize("hello")
     assert len(fake_say) == 1
     assert "-v" not in fake_say[0]
+
+
+def test_say_retries_once_when_it_writes_almost_no_audio(fake_say):
+    # 0.005 s is what say wrote for a whole sentence on one CI run.
+    fake_say.durations = [0.005]
+    speech = SayTts().synthesize("hello")
+    assert len(fake_say) == 2
+    assert len(speech.samples) == round(0.2 * OUTPUT_RATE)
+
+
+def test_say_retries_once_when_it_writes_only_silence(fake_say):
+    fake_say.durations = [(2.0, 0.0)]
+    speech = SayTts().synthesize("hello")
+    assert len(fake_say) == 2
+    assert np.abs(speech.samples).max() > 1000
+
+
+def test_say_retries_once_when_it_writes_an_empty_wav(fake_say):
+    fake_say.durations = [0.0]
+    speech = SayTts().synthesize("hello")
+    assert len(fake_say) == 2
+    assert len(speech.samples) > 0
+
+
+def test_say_that_writes_no_audio_twice_is_an_error_and_not_cached(fake_say, monkeypatch, tmp_path):
+    monkeypatch.setenv("VOICEQA_CACHE_DIR", str(tmp_path))
+    fake_say.durations = [0.005, 0.0]
+    with pytest.raises(TtsError, match="no audio") as exc_info:
+        CachedTts(SayTts()).synthesize("hello")
+    assert "twice" in str(exc_info.value)
+    assert len(fake_say) == 2
+    assert list(tmp_path.rglob("*.wav")) == []
+
+
+def test_say_short_output_for_text_with_nothing_to_say_is_fine(fake_say):
+    fake_say.durations = [0.0]
+    speech = SayTts().synthesize(" ... ")
+    assert len(fake_say) == 1
+    assert len(speech.samples) == 0
 
 
 @macos_only

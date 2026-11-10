@@ -20,6 +20,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
+
 from .interfaces import Speech
 from .tts_process import DEFAULT_TIMEOUT, TtsError, read_speech_wav, run_tts_process
 
@@ -70,6 +72,26 @@ _SAPI_VOICES = _SAPI_WRAPPER.replace(
         }
 """,
 )
+
+
+# `say` sometimes exits 0 having written only a few milliseconds of audio
+# for a whole sentence (seen once on a macOS CI runner: 0.005 s). Text with
+# at least one letter or digit must give at least MIN_SPEECH_SECONDS of
+# audio that is not all silence (peak at or above SILENT_PEAK), otherwise
+# the output counts as a failed synthesis and is retried once.
+MIN_SPEECH_SECONDS = 0.1
+SILENT_PEAK = 64
+
+
+def _peak(speech: Speech) -> int:
+    return int(np.abs(speech.samples.astype(np.int32)).max()) if len(speech.samples) else 0
+
+
+def _missing_audio(text: str, speech: Speech) -> bool:
+    if not any(ch.isalnum() for ch in text):
+        return False
+    too_short = len(speech.samples) < MIN_SPEECH_SECONDS * speech.rate
+    return too_short or _peak(speech) < SILENT_PEAK
 
 
 def parse_say_voices(output: str) -> list[str]:
@@ -181,5 +203,15 @@ class SayTts:
             if voice:
                 self._check_voice(voice)
                 args[1:1] = ["-v", voice]
-            run_tts_process(args, label="say", timeout=self._timeout)
-            return read_speech_wav(out, "say")
+            speech = None
+            for _ in range(2):
+                out.unlink(missing_ok=True)
+                run_tts_process(args, label="say", timeout=self._timeout)
+                speech = read_speech_wav(out, "say")
+                if not _missing_audio(text, speech):
+                    return speech
+            seconds = len(speech.samples) / speech.rate
+            raise TtsError(
+                f"say exited 0 but wrote no audio twice in a row ({seconds:.3f} s, "
+                f"peak {_peak(speech)}) for {len(text)} characters of text"
+            )
