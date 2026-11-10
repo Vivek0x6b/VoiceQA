@@ -1,5 +1,6 @@
 import json
 import re
+import wave
 
 import numpy as np
 import pytest
@@ -69,7 +70,7 @@ def test_doctor_reports_the_stt_extra_missing(monkeypatch, models_env):
     monkeypatch.setattr(model_cache, "stt_extra_installed", lambda: False)
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
-    assert "stt extra:     not installed (pip install voiceqa[stt])" in result.output
+    assert f"stt extra:     not installed ({model_cache.STT_EXTRA_HINT})" in result.output
 
 
 def test_doctor_shows_models_dir_and_cached_models(models_env):
@@ -139,7 +140,7 @@ def test_models_pull_without_the_extra_names_it(monkeypatch, models_env):
     monkeypatch.setattr(model_cache, "stt_extra_installed", lambda: False)
     result = runner.invoke(app, ["models", "pull", "stt", "base.en"])
     assert result.exit_code == 1
-    assert "voiceqa[stt]" in result.output
+    assert model_cache.STT_EXTRA_HINT in result.output
 
 
 def test_models_pull_rejects_an_unknown_model(models_env):
@@ -212,7 +213,7 @@ def test_bench_stt_without_the_extra_names_it(monkeypatch, models_env):
     monkeypatch.setattr(model_cache, "stt_extra_installed", lambda: False)
     result = runner.invoke(app, ["bench", "stt"])
     assert result.exit_code == 1
-    assert "voiceqa[stt]" in result.output
+    assert model_cache.STT_EXTRA_HINT in result.output
 
 
 SCRIPTED = Transcript(
@@ -272,7 +273,7 @@ def test_transcribe_without_the_extra_names_it(tmp_path, models_env):
     run_dir = make_run_dir(tmp_path / "run")
     result = runner.invoke(app, ["transcribe", str(run_dir)])
     assert result.exit_code == 1
-    assert "pip install voiceqa[stt]" in result.output
+    assert model_cache.STT_EXTRA_HINT in result.output
     assert not (run_dir / "transcript.json").exists()
 
 
@@ -291,6 +292,32 @@ def test_transcribe_a_folder_without_recordings(tmp_path, fake_worker, models_en
     assert fake_worker == []
 
 
+def test_transcribe_a_corrupt_wav_fails_cleanly(tmp_path, fake_worker, models_env):
+    run_dir = make_run_dir(tmp_path / "run")
+    (run_dir / "caller.wav").write_bytes(b"NOTAWAVFILE1234567890")
+
+    result = runner.invoke(app, ["transcribe", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert "caller.wav" in result.output
+    assert not (run_dir / "transcript.json").exists()
+
+
+def test_transcribe_a_non_16_bit_wav_names_the_file(tmp_path, fake_worker, models_env):
+    run_dir = make_run_dir(tmp_path / "run")
+    with wave.open(str(run_dir / "caller.wav"), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(1)
+        w.setframerate(8000)
+        w.writeframes(b"\x00" * 8000)
+
+    result = runner.invoke(app, ["transcribe", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert "caller.wav" in result.output
+    assert not (run_dir / "transcript.json").exists()
+
+
 def test_transcribe_interrupted(tmp_path, monkeypatch):
     def interrupted(*args):
         raise KeyboardInterrupt
@@ -302,11 +329,13 @@ def test_transcribe_interrupted(tmp_path, monkeypatch):
     assert "transcription interrupted" in result.output
 
 
-def test_call_transcribe_interrupted_keeps_the_call_summary(tmp_path, fake_call, monkeypatch):
+def test_call_transcribe_interrupted_keeps_the_call_summary(
+    tmp_path, fake_call, fake_worker, monkeypatch
+):
     def interrupted(*args):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "_make_transcript", interrupted)
+    monkeypatch.setattr(cli, "_run_transcription", interrupted)
     result = runner.invoke(app, call_args(tmp_path, "--transcribe"))
     assert result.exit_code == 1
     assert "answered      yes" in result.stdout
@@ -368,23 +397,22 @@ def test_call_without_transcribe_writes_no_transcript(tmp_path, fake_call, fake_
     assert fake_worker == []
 
 
-def test_call_transcribe_without_the_extra_keeps_the_call_result(tmp_path, fake_call, models_env):
+def test_call_transcribe_without_the_extra_never_dials(tmp_path, fake_call, models_env):
     result = runner.invoke(app, call_args(tmp_path, "--transcribe"))
 
-    # The call was answered, so the exit code stays 0. The transcript step
-    # says what went wrong and how to fix it.
-    assert result.exit_code == 0
-    assert "answered      yes" in result.stdout
-    assert "pip install voiceqa[stt]" in result.stderr
+    # The extra is checked before dialing, so nothing is called and the
+    # error names the fix.
+    assert result.exit_code == 1
+    assert model_cache.STT_EXTRA_HINT in result.stderr
+    assert fake_call["calls"] == 0
     assert not (tmp_path / "run" / "transcript.json").exists()
 
 
-def test_call_transcribe_without_the_model_keeps_the_call_result(
-    tmp_path, fake_call, models_env, stt_extra
-):
+def test_call_transcribe_without_the_model_never_dials(tmp_path, fake_call, models_env, stt_extra):
     result = runner.invoke(app, call_args(tmp_path, "--transcribe", "--stt-model", "tiny.en"))
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "voiceqa models pull stt tiny.en" in result.stderr
+    assert fake_call["calls"] == 0
 
 
 def test_call_transcribe_skips_an_unanswered_call(tmp_path, fake_call, fake_worker, models_env):
@@ -392,10 +420,26 @@ def test_call_transcribe_skips_an_unanswered_call(tmp_path, fake_call, fake_work
     result = runner.invoke(app, call_args(tmp_path, "--transcribe"))
     assert result.exit_code == 1
     assert re.search(r"transcript\s+skipped", result.output)
-    assert fake_worker == []
+    # The extra/model check (through the faked worker) still runs before
+    # dialing, even though the call ends up unanswered.
+    assert fake_worker == [("base.en", None)]
 
 
 def test_call_transcribe_checks_the_model_name_before_calling(tmp_path, fake_call, fake_worker):
     result = runner.invoke(app, call_args(tmp_path, "--transcribe", "--stt-model", "enormous.en"))
     assert result.exit_code == 2
+    assert fake_call["calls"] == 0
+
+
+def test_call_stt_model_without_transcribe_is_a_bad_option(tmp_path, fake_call):
+    result = runner.invoke(app, call_args(tmp_path, "--stt-model", "tiny.en"))
+    assert result.exit_code == 2
+    assert "--transcribe" in result.stderr
+    assert fake_call["calls"] == 0
+
+
+def test_call_models_dir_without_transcribe_is_a_bad_option(tmp_path, fake_call):
+    result = runner.invoke(app, call_args(tmp_path, "--models-dir", str(tmp_path)))
+    assert result.exit_code == 2
+    assert "--transcribe" in result.stderr
     assert fake_call["calls"] == 0

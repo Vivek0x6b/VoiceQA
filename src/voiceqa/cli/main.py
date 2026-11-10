@@ -4,6 +4,7 @@ import os
 import platform
 import re
 import shutil
+import wave
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -243,16 +244,31 @@ def _stt_worker(model: str, models_dir: Path | None) -> SttWorker:
     return SttWorker("faster-whisper", model=model, models_dir=str(directory))
 
 
-def _make_transcript(run_dir: Path, model: str, models_dir: Path | None) -> tuple[Path, Transcript]:
-    with _stt_worker(model, models_dir) as worker:
+def _run_transcription(run_dir: Path, worker: SttWorker) -> tuple[Path, Transcript]:
+    with worker:
         transcript = asyncio.run(transcribe_run(run_dir, worker))
     return write_transcript(run_dir, transcript), transcript
 
 
+def _make_transcript(run_dir: Path, model: str, models_dir: Path | None) -> tuple[Path, Transcript]:
+    return _run_transcription(run_dir, _stt_worker(model, models_dir))
+
+
 _TRANSCRIPT_ERRORS = (SttExtraMissingError, ModelNotAvailableError, SttWorkerError)
+
+DEFAULT_STT_MODEL = "base.en"
 
 SttModelOption = Annotated[
     str, typer.Option("--stt-model", help="faster-whisper model for the transcript.")
+]
+# None by default: --stt-model only applies together with --transcribe, and the
+# effective default (DEFAULT_STT_MODEL) is filled in only when that is set.
+CallSttModelOption = Annotated[
+    str | None,
+    typer.Option(
+        "--stt-model",
+        help="faster-whisper model for the transcript. Only used with --transcribe.",
+    ),
 ]
 
 
@@ -278,6 +294,9 @@ def transcribe(
     try:
         path, transcript = _make_transcript(run_dir, stt_model, models_dir)
     except _TRANSCRIPT_ERRORS as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    except (wave.Error, ValueError, EOFError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from None
     except KeyboardInterrupt:
@@ -342,7 +361,7 @@ def _tts_engine(tts: str | None, prompts: Path | None, wav_hint: str) -> TextToS
 def _synthesize(engine: TextToSpeech, text: str, voice: str | None) -> Speech:
     try:
         speech = engine.synthesize(text, voice)
-    except (TtsError, ValueError) as exc:
+    except (TtsError, ValueError, OSError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from None
     if len(speech.samples) == 0:
@@ -389,7 +408,11 @@ def say(
     _check_text(text)
     engine = _tts_engine(tts, prompts, hint)
     speech = _synthesize(engine, text, voice)
-    write_wav(out, speech.samples, speech.rate)
+    try:
+        write_wav(out, speech.samples, speech.rate)
+    except OSError as exc:
+        typer.echo(f"error: cannot write {out}: {exc}", err=True)
+        raise typer.Exit(1) from None
     _line("engine", engine.name)
     _line("audio", f"{len(speech.samples) / speech.rate:.2f} s at {speech.rate} Hz")
     _line("saved", str(out))
@@ -521,10 +544,11 @@ def call(
         bool,
         typer.Option(
             "--transcribe",
-            help="After the call, write transcript.json (needs the \\[stt] extra).",
+            help="Check the \\[stt] extra and model, then write transcript.json "
+            "once the call ends.",
         ),
     ] = False,
-    stt_model: SttModelOption = "base.en",
+    stt_model: CallSttModelOption = None,
     models_dir: ModelsDirOption = None,
     say_text: Annotated[
         str | None,
@@ -544,10 +568,12 @@ def call(
     never costs a call: it exits 2 for bad TTS options and 1 when the
     engine fails, without calling.
 
-    With --transcribe, the recording is transcribed once the call is over.
-    The exit code is still the call's: if the transcript cannot be made
-    (no \\[stt] extra, model not downloaded), the error and its fix are
-    printed and no transcript.json is written.
+    With --transcribe, the \\[stt] extra and the model are checked before
+    dialing: if either is missing, nothing is dialed and the error names
+    the fix (exit 1). --stt-model and --models-dir only apply together
+    with --transcribe. Once an answered call ends, the recording is
+    transcribed; if that fails, the error goes to stderr and the exit
+    code is still the call's.
     """
     if say_text is not None and play is not None:
         raise _bad_option("use either --say or --play, not both")
@@ -555,8 +581,17 @@ def call(
         raise _bad_option("--tts, --voice and --prompts only apply together with --say")
     if say_text is not None:
         _check_text(say_text)
+    if not transcribe and (stt_model is not None or models_dir is not None):
+        raise _bad_option("--stt-model and --models-dir only apply together with --transcribe")
+    stt_worker = None
     if transcribe:
-        _check_model_name(stt_model)
+        model = stt_model or DEFAULT_STT_MODEL
+        _check_model_name(model)
+        try:
+            stt_worker = _stt_worker(model, models_dir)
+        except _TRANSCRIPT_ERRORS as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1) from None
     if "@" in target and not target.startswith(("sip:", "sips:")):
         typer.echo(
             "error: TARGET must not contain '@' unless it is a full sip: URI "
@@ -619,16 +654,16 @@ def call(
 
     _print_summary(result)
     if transcribe:
-        _transcribe_after_call(result, stt_model, models_dir)
+        _transcribe_after_call(result, stt_worker)
     raise typer.Exit(0 if result.answered else 1)
 
 
-def _transcribe_after_call(result: CallResult, stt_model: str, models_dir: Path | None) -> None:
+def _transcribe_after_call(result: CallResult, worker: SttWorker) -> None:
     if not result.answered:
         _line("transcript", "skipped, the call was not answered")
         return
     try:
-        path, _ = _make_transcript(result.record_dir, stt_model, models_dir)
+        path, _ = _run_transcription(result.record_dir, worker)
     except _TRANSCRIPT_ERRORS as exc:
         typer.echo(f"error: no transcript: {exc}", err=True)
         _line("transcript", "none")
