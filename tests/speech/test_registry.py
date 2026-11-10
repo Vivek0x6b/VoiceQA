@@ -1,3 +1,6 @@
+import importlib
+import sys
+
 import pytest
 import yaml
 
@@ -29,9 +32,18 @@ def test_create_tts_reserved_names_not_implemented(name):
         create_tts(name)
 
 
-def test_create_stt_reserved_name_not_implemented():
-    with pytest.raises(NotImplementedError):
-        create_stt("faster-whisper")
+def test_importing_the_whisper_backend_without_the_extra_names_it(monkeypatch):
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)
+    monkeypatch.delitem(sys.modules, "voiceqa.speech.whisper", raising=False)
+    with pytest.raises(ImportError, match=r"voiceqa\[stt\]"):
+        importlib.import_module("voiceqa.speech.whisper")
+
+
+def test_create_stt_faster_whisper_without_the_extra_names_it(monkeypatch):
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)
+    monkeypatch.delitem(sys.modules, "voiceqa.speech.whisper", raising=False)
+    with pytest.raises(ImportError, match=r"voiceqa\[stt\]"):
+        create_stt("faster-whisper", model="tiny.en")
 
 
 def test_create_tts_plugin_prefix_parses_but_is_not_implemented():

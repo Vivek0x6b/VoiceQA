@@ -1,9 +1,10 @@
 """Looks up TTS and STT engines by name.
 
-Known now: "wav" (WavPromptTts) and "fake" (FakeTts / FakeStt). "sapi" and
-"say" (OS TTS engines) and "faster-whisper" (STT) are reserved for later
-tasks and raise NotImplementedError until then, rather than being unknown
-names. A name of the form "plugin:<name>" parses (see the subprocess
+Known now: "wav" (WavPromptTts), "fake" (FakeTts / FakeStt) and
+"faster-whisper" (FasterWhisperStt, imported only when asked for, since it
+needs the [stt] extra). "sapi" and "say" (OS TTS engines) are reserved for a
+later task and raise NotImplementedError until then, rather than being
+unknown names. A name of the form "plugin:<name>" parses (see the subprocess
 contract below) but also raises NotImplementedError until the plugin
 runner lands.
 
@@ -27,7 +28,12 @@ _TTS_ENGINES: dict[str, type[TextToSpeech]] = {"wav": WavPromptTts, "fake": Fake
 _RESERVED_TTS = ("sapi", "say")
 
 _STT_ENGINES: dict[str, type[SpeechToText]] = {"fake": FakeStt}
-_RESERVED_STT = ("faster-whisper",)
+
+
+def _faster_whisper(**kwargs: object) -> SpeechToText:
+    from .whisper import FasterWhisperStt
+
+    return FasterWhisperStt(**kwargs)
 
 
 def _reject_plugin_for_now(name: str) -> None:
@@ -52,11 +58,11 @@ def create_tts(name: str, **kwargs: object) -> TextToSpeech:
 
 def create_stt(name: str, **kwargs: object) -> SpeechToText:
     _reject_plugin_for_now(name)
-    if name in _RESERVED_STT:
-        raise NotImplementedError(f"STT engine {name!r} is not implemented yet")
+    if name == "faster-whisper":
+        return _faster_whisper(**kwargs)
     try:
         engine = _STT_ENGINES[name]
     except KeyError:
-        known = ", ".join(sorted(_STT_ENGINES))
+        known = ", ".join(sorted([*_STT_ENGINES, "faster-whisper"]))
         raise ValueError(f"unknown STT engine {name!r}, known engines: {known}") from None
     return engine(**kwargs)
