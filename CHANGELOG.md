@@ -57,6 +57,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - docs/ARCHITECTURE.md: M2 is done. New "Speech interface" section next to "Media interface", the loopback test and help markup decisions, and M3 (YAML scenario engine) as the next milestone, which takes over live per-turn STT with end-of-turn detection.
 - docs/ARCHITECTURE.md: M2 issue 4 is done, with the TTS engine, plugin runner and cache decisions and their known problems.
 - docs/ARCHITECTURE.md: M2 issue 3 is done; the worker process, transcript.json and WER decisions are written down, along with how far off faster-whisper's word start times are.
+- `voiceqa.speech` package: `Speech` (int16 mono samples and rate), the `TextToSpeech` and `SpeechToText` protocols, and the `Word`, `Segment`, `Transcript` models that give transcript.json one schema.
+- `WavPromptTts`: maps text to a WAV file from a YAML index (text to file path, relative to the index file's folder) or from an in-memory mapping. Text is matched after stripping whitespace, case sensitive. Unknown text is a `ValueError` naming it, never silence. Keeps the file's own sample rate and downmixes stereo to mono.
+- `FakeTts` (tone bursts whose length follows the text) and `FakeStt` (a scripted `Transcript`, given as a `Transcript` or as plain data) for tests that need a TTS or STT engine without real speech.
+- `create_tts(name, **kwargs)` and `create_stt(name, **kwargs)`: look up a TTS or STT engine by name (`wav`, `fake`, `sapi`, `say`, `faster-whisper`, `plugin:<name>`) from plain, picklable keyword arguments only. An unknown name raises `ValueError` listing the known engines.
 
 ### Changed
 
@@ -71,12 +75,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - The test agent no longer starts media when a BYE arrives right after the ACK, before media was started.
 - docs/ARCHITECTURE.md marks M1 as done and names M2 (local STT and TTS) as the current milestone.
 - docs/ARCHITECTURE.md lists the M2 issues and the decisions behind them: faster-whisper as an optional extra, WAV prompts plus OS speech engines for TTS, and neural TTS engines only as separately installed plugins for licence reasons.
-- `voiceqa.speech` package: `Speech` (int16 mono samples and rate), the `TextToSpeech` and `SpeechToText` protocols, and the `Word`, `Segment`, `Transcript` models that give transcript.json one schema.
-- `WavPromptTts`: maps text to a WAV file from a YAML index (text to file path, relative to the index file's folder) or from an in-memory mapping. Text is matched after stripping whitespace, case sensitive. Unknown text is a `ValueError` naming it, never silence. Keeps the file's own sample rate and downmixes stereo to mono.
-- `FakeTts` (tone bursts whose length follows the text) and `FakeStt` (a scripted `Transcript`, given as a `Transcript` or as plain data) for tests that need a TTS or STT engine without real speech.
-- `create_tts(name, **kwargs)` and `create_stt(name, **kwargs)`: look up an engine by name (`wav`, `fake` for now). Reserved names (`sapi`, `say`, `faster-whisper`) and any `plugin:<name>` raise `NotImplementedError` until their tasks land; any other unknown name raises `ValueError` listing the known engines.
 - `run_call` resolves the SIP server once and hands the address to `place_call` (new `server` argument and public `resolve_server`), instead of looking it up a second time. An unresolvable server now reads "cannot resolve SIP server HOST: ..." in the call summary.
-
 - `create_tts("sapi")`, `create_tts("say")` and `create_tts("plugin:<name>")` now build engines instead of raising `NotImplementedError`. An OS engine on the wrong OS raises `TtsError`. `create_stt("plugin:<name>")` still raises `NotImplementedError`, since there are no STT plugins.
 
 ### Fixed
@@ -84,3 +83,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `test_reinvite_mid_call_does_not_interrupt_the_echo` counted silence frames slipped into the echo and failed on one CI job under load. It now checks energy only, matching the already-accepted contract that the agent may slip a silence frame into the echo when its queue runs dry for a slot (see `test_recording_of_an_echo_call_lines_up_on_one_clock`).
 - The real-model STT tests load tiny.en with `cpu_threads=1` instead of the faster-whisper default, so the test process keeps fewer CTranslate2 worker threads alive after the model tests finish (that thread pool has no release call, so it stays for the rest of the pytest run).
 - `voiceqa call --help` lost the word "[stt]" (it read "needs the  extra") because Rich took it for a style tag. It is escaped now, and a test checks every bracketed word in every command's help.
+- `voiceqa call --transcribe` dialed before checking the `[stt]` extra and the model, so a missing one was only reported after a real call had already gone out. Both are now checked before dialing; a missing extra or model exits 1 and nothing is dialed.
+- `--stt-model` and `--models-dir` on `voiceqa call` were silently ignored without `--transcribe`. They now exit 2 when given without it.
+- The `[stt]` extra install hint (`pip install voiceqa[stt]`) named a PyPI package VoiceQA is not published as, and the unquoted brackets fail in zsh. It now reads `pip install -e ".[stt]"` from a checkout.
+- `voiceqa say` and `voiceqa call --say` could crash with a traceback instead of a clean error when a WAV prompt file named in the index was missing, or when the output WAV could not be written (for example `-o` into a folder that does not exist). Both now exit 1 with a plain message.
+- `voiceqa transcribe` crashed with a traceback on a corrupt or non-16-bit WAV instead of exiting 1 with a plain message naming the file.

@@ -69,6 +69,8 @@ To see how fast a model runs on your CPU, on an 18 s test clip that ships with V
 voiceqa bench stt --stt-model base.en
 ```
 
+If the model is not on disk yet, `voiceqa bench stt` downloads it first, printing where it is going before it starts.
+
 ```
 engine            faster-whisper base.en
 audio             18.1 s, 4 utterances
