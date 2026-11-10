@@ -1,4 +1,4 @@
-from voiceqa.telephony.sip.call import SipCall, SipConfig, place_call
+from voiceqa.telephony.sip.call import SipCall, SipConfig, place_call, resolve_server
 from voiceqa.telephony.sip.errors import (
     SdpError,
     SipAuthError,
@@ -22,4 +22,5 @@ __all__ = [
     "SipStatusError",
     "SipTimeoutError",
     "place_call",
+    "resolve_server",
 ]

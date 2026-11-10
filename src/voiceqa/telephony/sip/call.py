@@ -79,7 +79,7 @@ def _target_uri(target: str, server_host: str) -> str:
     return f"sip:{target}@{server_host}"
 
 
-async def _resolve(host: str, port: int) -> Address:
+async def resolve_server(host: str, port: int) -> Address:
     loop = asyncio.get_running_loop()
     try:
         infos = await loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_DGRAM)
@@ -381,16 +381,20 @@ async def place_call(
     target_uri: str,
     local_media: LocalMedia,
     on_event: OnEvent | None = None,
+    server: Address | None = None,
 ) -> SipCall:
     """Call target_uri and return once it is answered and ACKed.
 
     target_uri may be a full SIP URI or just a user part, which is sent to
     the configured server. on_event is told about call events as they happen
-    (see OnEvent), for example CallRecorder.event. Raises SipStatusError on a
-    final failure, SipTimeoutError if the server never answers, and SdpError
-    if the answer has no usable audio stream (the call is hung up first).
+    (see OnEvent), for example CallRecorder.event. server is the configured
+    server's address if the caller already resolved it (resolve_server);
+    otherwise it is resolved here. Raises SipStatusError on a final failure,
+    SipTimeoutError if the server never answers, and SdpError if the answer
+    has no usable audio stream (the call is hung up first).
     """
-    server = await _resolve(config.server_host, config.server_port)
+    if server is None:
+        server = await resolve_server(config.server_host, config.server_port)
     host = routing_ip(server) if config.local_host in _WILDCARDS else config.local_host
     call = SipCall(config, server, host, on_event or _ignore)
     await call._open()

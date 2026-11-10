@@ -9,7 +9,6 @@ flow instead of duplicating it.
 import asyncio
 import contextlib
 import json
-import socket
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,7 +18,13 @@ from voiceqa.audio.analysis import first_loud_frame
 from voiceqa.telephony.media import SAMPLE_RATE, PayloadType, media_clock
 from voiceqa.telephony.recording import CallRecorder
 from voiceqa.telephony.rtp import RtpSession
-from voiceqa.telephony.sip import SipConfig, SipError, SipStatusError, place_call
+from voiceqa.telephony.sip import (
+    SipConfig,
+    SipError,
+    SipStatusError,
+    place_call,
+    resolve_server,
+)
 from voiceqa.telephony.sip.transport import routing_ip
 
 
@@ -33,12 +38,6 @@ class CallResult:
     frames_received: int
     first_audio_latency: float | None
     record_dir: Path
-
-
-async def _resolve(host: str, port: int) -> tuple[str, int]:
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_DGRAM)
-    return infos[0][4][0], infos[0][4][1]
 
 
 def _answered_at(record_dir: Path) -> float | None:
@@ -93,9 +92,9 @@ async def run_call(
     frames_received = 0
     try:
         try:
-            resolved = await _resolve(server_host, server_port)
-        except OSError as exc:
-            reason = f"cannot resolve {server_host}: {exc}"
+            resolved = await resolve_server(server_host, server_port)
+        except SipError as exc:
+            reason = str(exc)
         else:
             advertise_host = routing_ip(resolved)
             rtp = await RtpSession.open(
@@ -110,7 +109,9 @@ async def run_call(
                     password=password,
                 )
                 try:
-                    call = await place_call(sip_config, target, rtp.local, on_event=rec.event)
+                    call = await place_call(
+                        sip_config, target, rtp.local, on_event=rec.event, server=resolved
+                    )
                 except SipStatusError as exc:
                     status, reason = exc.status, exc.reason
                 except SipError as exc:

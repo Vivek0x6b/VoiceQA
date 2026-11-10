@@ -200,6 +200,61 @@ def test_call_with_unresolvable_server_is_reported_not_answered(tmp_path, monkey
     assert (tmp_path / "events.json").exists()
 
 
+def test_unresolvable_server_reason_names_the_sip_server(tmp_path, monkeypatch):
+    def raise_gaierror(*args, **kwargs):
+        raise socket.gaierror("not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", raise_gaierror)
+
+    result = asyncio.run(
+        run_call(
+            target="agent",
+            server_host="nope.invalid.example",
+            server_port=5060,
+            username="1001",
+            password="",
+            audio=generate_tone(440, 0.2),
+            record_dir=tmp_path,
+            duration=1.0,
+        )
+    )
+
+    assert result.reason == "cannot resolve SIP server nope.invalid.example: not known"
+
+
+def test_call_resolves_the_sip_server_once(tmp_path, monkeypatch):
+    real_getaddrinfo = socket.getaddrinfo
+    lookups = []
+
+    def counting_getaddrinfo(host, port, *args, **kwargs):
+        lookups.append((host, port))
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", counting_getaddrinfo)
+
+    async def main():
+        agent = await start_agent()
+        try:
+            result = await run_call(
+                target="agent",
+                server_host="127.0.0.1",
+                server_port=agent.local_addr[1],
+                username="1001",
+                password="",
+                audio=generate_tone(440, 0.2),
+                record_dir=tmp_path,
+                duration=0.4,
+            )
+            return result, agent.local_addr[1]
+        finally:
+            await agent.close()
+
+    result, port = asyncio.run(main())
+
+    assert result.answered
+    assert lookups.count(("127.0.0.1", port)) == 1
+
+
 def test_codec_option_offers_only_that_payload_type(tmp_path, monkeypatch):
     # The agent supports both PCMU and PCMA and, per parse_offer, picks the
     # first payload type in our offer that it also supports. If our offer

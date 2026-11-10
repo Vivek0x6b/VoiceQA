@@ -58,6 +58,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `WavPromptTts`: maps text to a WAV file from a YAML index (text to file path, relative to the index file's folder) or from an in-memory mapping. Text is matched after stripping whitespace, case sensitive. Unknown text is a `ValueError` naming it, never silence. Keeps the file's own sample rate and downmixes stereo to mono.
 - `FakeTts` (tone bursts whose length follows the text) and `FakeStt` (a scripted `Transcript`, given as a `Transcript` or as plain data) for tests that need a TTS or STT engine without real speech.
 - `create_tts(name, **kwargs)` and `create_stt(name, **kwargs)`: look up an engine by name (`wav`, `fake` for now). Reserved names (`sapi`, `say`, `faster-whisper`) and any `plugin:<name>` raise `NotImplementedError` until their tasks land; any other unknown name raises `ValueError` listing the known engines.
+- `run_call` resolves the SIP server once and hands the address to `place_call` (new `server` argument and public `resolve_server`), instead of looking it up a second time. An unresolvable server now reads "cannot resolve SIP server HOST: ..." in the call summary.
 
 ### Fixed
 
