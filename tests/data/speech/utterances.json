@@ -1,0 +1,26 @@
+{
+  "audio": "magi_8k.wav",
+  "rate": 8000,
+  "utterances": [
+    {
+      "start": 0.32,
+      "end": 3.30,
+      "text": "Della, being slender, had mastered the art."
+    },
+    {
+      "start": 3.76,
+      "end": 6.94,
+      "text": "Suddenly she whirled from the window and stood before the glass."
+    },
+    {
+      "start": 7.64,
+      "end": 13.14,
+      "text": "Her eyes were shining brilliantly, but her face had lost its color within twenty seconds."
+    },
+    {
+      "start": 13.94,
+      "end": 17.66,
+      "text": "Rapidly she pulled down her hair and let it fall to its full length."
+    }
+  ]
+}
