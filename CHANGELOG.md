@@ -43,6 +43,9 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `voiceqa.speech.wer`: word error rate (word-level edit distance over reference words) with text normalised for case and punctuation, apostrophes inside words kept and numbers left as written. The real-model tests use it instead of their own copy.
 - `SttWorker` (`voiceqa.speech.worker`): runs an STT engine in a child process started with "spawn" on every OS. The engine is built in the child from its registry name and plain keyword arguments and loaded once. `transcribe()` is async and never blocks the event loop, `submit()` returns a future, `close()` lets queued jobs finish within a timeout and then terminates the child. A child that dies or an engine that fails to load fails the pending jobs with `SttWorkerError` instead of hanging.
 - `FakeStt` takes `delay` (seconds per job) and `error` (raise on every job) for testing slow and failing jobs.
+- `voiceqa transcribe RUN_DIR [--stt-model M] [--models-dir D]`: transcribes caller.wav and agent.wav in the STT worker and writes transcript.json, with each segment tagged `caller` or `agent`, timed on the same zero as events.json and the WAVs, and sorted by start time. Long tracks are read in blocks and sent in chunks of up to ten minutes, cut at a quiet frame. A missing `[stt]` extra or model is an error naming the fix (exit 1), and a folder without the two WAVs is exit 2.
+- `voiceqa call --transcribe [--stt-model M] [--models-dir D]`: writes transcript.json once an answered call has ended. If the transcript cannot be made, the error and its fix go to stderr and the exit code stays the call's.
+- docs/ARCHITECTURE.md: M2 issue 3 is done; the worker process, transcript.json and WER decisions are written down, along with how far off faster-whisper's word start times are.
 
 ### Changed
 

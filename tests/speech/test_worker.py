@@ -10,6 +10,7 @@ import asyncio
 import multiprocessing
 import os
 import signal
+import time
 
 import numpy as np
 import pytest
@@ -18,7 +19,7 @@ from voiceqa.audio.wav import read_wav
 from voiceqa.speech import Segment, Transcript
 from voiceqa.speech.bench import default_clip_dir, load_bench_clip
 from voiceqa.speech.wer import wer
-from voiceqa.speech.worker import SttWorker, SttWorkerError
+from voiceqa.speech.worker import DEFAULT_CLOSE_TIMEOUT, SttWorker, SttWorkerError
 
 # Bound for anything that waits on the child, so a broken worker fails the
 # test instead of hanging the run.
@@ -114,6 +115,21 @@ def test_close_fails_jobs_still_pending_when_the_timeout_runs_out(clip):
     for job in jobs:
         with pytest.raises(SttWorkerError, match="closed"):
             job.result(timeout=0)
+
+
+def test_leaving_the_with_block_on_an_error_does_not_wait_for_jobs(clip):
+    started = time.perf_counter()
+    with pytest.raises(KeyboardInterrupt):
+        with fake_worker(delay=60) as worker:
+            run(worker.wait_ready())
+            job = worker.submit(*clip)
+            raise KeyboardInterrupt
+    # close() would give the job DEFAULT_CLOSE_TIMEOUT (10 s) to finish on a
+    # normal exit; on an error it stops the child straight away.
+    assert time.perf_counter() - started < DEFAULT_CLOSE_TIMEOUT
+    assert not worker.is_alive()
+    with pytest.raises(SttWorkerError, match="closed"):
+        job.result(timeout=0)
 
 
 def test_child_killed_mid_job_is_an_error_not_a_hang(clip):

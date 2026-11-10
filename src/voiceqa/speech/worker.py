@@ -194,14 +194,16 @@ class SttWorker:
     def __enter__(self) -> "SttWorker":
         return self.start()
 
-    def __exit__(self, *exc: object) -> None:
-        self.close()
+    # Leaving the block on an error (Ctrl+C included) stops the child at
+    # once instead of waiting for queued jobs nobody will read.
+    def __exit__(self, exc_type: object, *exc: object) -> None:
+        self.close(DEFAULT_CLOSE_TIMEOUT if exc_type is None else 0)
 
     async def __aenter__(self) -> "SttWorker":
         return self.start()
 
-    async def __aexit__(self, *exc: object) -> None:
-        await self.aclose()
+    async def __aexit__(self, exc_type: object, *exc: object) -> None:
+        await self.aclose(DEFAULT_CLOSE_TIMEOUT if exc_type is None else 0)
 
     def _ended_error(self) -> SttWorkerError:
         if self._closed:

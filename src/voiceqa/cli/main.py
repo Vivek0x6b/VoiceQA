@@ -15,10 +15,12 @@ from voiceqa import __version__
 from voiceqa.audio.dsp import generate_tone
 from voiceqa.engine.calibrate import CalibrationResult, run_calibration
 from voiceqa.engine.call import CallResult, run_call
+from voiceqa.engine.transcribe import TRACKS, transcribe_run, write_transcript
 from voiceqa.speech import model_cache
 from voiceqa.speech.bench import default_clip_dir, load_bench_clip, run_stt_bench
 from voiceqa.speech.model_cache import (
     KNOWN_SIZES_MB,
+    STT_EXTRA_HINT,
     ModelNotAvailableError,
     SttExtraMissingError,
     cached_models,
@@ -28,6 +30,8 @@ from voiceqa.speech.model_cache import (
     repo_id,
     resolve_models_dir,
 )
+from voiceqa.speech.models import Transcript
+from voiceqa.speech.worker import SttWorker, SttWorkerError
 from voiceqa.telephony.local.agent import AgentConfig, LocalAgent, load_prompt
 from voiceqa.telephony.media import PayloadType
 
@@ -219,6 +223,66 @@ def bench_stt(
     _bench_line("utterance max", f"{result.utterance_max_ms:.0f} ms")
 
 
+def _stt_worker(model: str, models_dir: Path | None) -> SttWorker:
+    """A (not yet started) faster-whisper worker, after checking up front
+    that the extra and the model are there, so the error names the fix."""
+    if not model_cache.stt_extra_installed():
+        raise SttExtraMissingError(f"transcription needs the [stt] extra: {STT_EXTRA_HINT}")
+    directory = resolve_models_dir(models_dir)
+    if find_model(model, directory) is None:
+        raise ModelNotAvailableError(
+            f"faster-whisper model {model} is not in {directory}. "
+            f"Download it first: voiceqa models pull stt {model}"
+        )
+    return SttWorker("faster-whisper", model=model, models_dir=str(directory))
+
+
+def _make_transcript(run_dir: Path, model: str, models_dir: Path | None) -> tuple[Path, Transcript]:
+    with _stt_worker(model, models_dir) as worker:
+        transcript = asyncio.run(transcribe_run(run_dir, worker))
+    return write_transcript(run_dir, transcript), transcript
+
+
+_TRANSCRIPT_ERRORS = (SttExtraMissingError, ModelNotAvailableError, SttWorkerError)
+
+SttModelOption = Annotated[
+    str, typer.Option("--stt-model", help="faster-whisper model for the transcript.")
+]
+
+
+@app.command()
+def transcribe(
+    run_dir: Annotated[
+        Path, typer.Argument(help="Run folder with caller.wav and agent.wav, from voiceqa call.")
+    ],
+    stt_model: SttModelOption = "base.en",
+    models_dir: ModelsDirOption = None,
+) -> None:
+    """Transcribe a recorded call into transcript.json in its run folder.
+
+    Each side is transcribed on its own and every segment is tagged caller
+    or agent. Times are seconds on the same zero as events.json and the
+    WAVs. The model must already be downloaded (voiceqa models pull stt).
+    """
+    _check_model_name(stt_model)
+    for _, name in TRACKS:
+        if not (run_dir / name).is_file():
+            typer.echo(f"error: no {name} in {run_dir}", err=True)
+            raise typer.Exit(2)
+    try:
+        path, transcript = _make_transcript(run_dir, stt_model, models_dir)
+    except _TRANSCRIPT_ERRORS as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        typer.echo("transcription interrupted", err=True)
+        raise typer.Exit(1) from None
+    _line("transcript", str(path))
+    _line("segments", str(len(transcript.segments)))
+    for s in transcript.segments:
+        typer.echo(f"{s.start:8.2f}  {s.speaker:<6}  {s.text}")
+
+
 @app.command()
 def agent(
     host: Annotated[str, typer.Option(help="Address to listen on for SIP and RTP.")] = "127.0.0.1",
@@ -340,13 +404,28 @@ def call(
         typer.Option(help="Hang up this many seconds after the answer.", callback=_positive),
     ] = 10.0,
     codec: Annotated[Codec, typer.Option(help="Payload type to offer.")] = Codec.pcmu,
+    transcribe: Annotated[
+        bool,
+        typer.Option(
+            "--transcribe", help="After the call, write transcript.json (needs the [stt] extra)."
+        ),
+    ] = False,
+    stt_model: SttModelOption = "base.en",
+    models_dir: ModelsDirOption = None,
 ) -> None:
     """Place one call, send audio, and record both sides.
 
     The SIP password, if the server needs one, is read from the
     VOICEQA_SIP_PASSWORD environment variable, never from a command line
     option, so it never ends up in shell history.
+
+    With --transcribe, the recording is transcribed once the call is over.
+    The exit code is still the call's: if the transcript cannot be made
+    (no [stt] extra, model not downloaded), the error and its fix are
+    printed and no transcript.json is written.
     """
+    if transcribe:
+        _check_model_name(stt_model)
     if "@" in target and not target.startswith(("sip:", "sips:")):
         typer.echo(
             "error: TARGET must not contain '@' unless it is a full sip: URI "
@@ -401,7 +480,25 @@ def call(
         raise typer.Exit(1) from None
 
     _print_summary(result)
+    if transcribe:
+        _transcribe_after_call(result, stt_model, models_dir)
     raise typer.Exit(0 if result.answered else 1)
+
+
+def _transcribe_after_call(result: CallResult, stt_model: str, models_dir: Path | None) -> None:
+    if not result.answered:
+        _line("transcript", "skipped, the call was not answered")
+        return
+    try:
+        path, _ = _make_transcript(result.record_dir, stt_model, models_dir)
+    except _TRANSCRIPT_ERRORS as exc:
+        typer.echo(f"error: no transcript: {exc}", err=True)
+        _line("transcript", "none")
+        return
+    except KeyboardInterrupt:
+        typer.echo("transcription interrupted", err=True)
+        raise typer.Exit(1) from None
+    _line("transcript", str(path))
 
 
 def _print_calibration_summary(result: CalibrationResult) -> None:
