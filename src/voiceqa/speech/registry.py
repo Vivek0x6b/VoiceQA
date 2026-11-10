@@ -1,33 +1,51 @@
 """Looks up TTS and STT engines by name.
 
-Known now: "wav" (WavPromptTts), "fake" (FakeTts / FakeStt) and
-"faster-whisper" (FasterWhisperStt, imported only when asked for, since it
-needs the [stt] extra). "sapi" and "say" (OS TTS engines) are reserved for a
-later task and raise NotImplementedError until then, rather than being
-unknown names. A name of the form "plugin:<name>" parses (see the subprocess
-contract below) but also raises NotImplementedError until the plugin
-runner lands.
+TTS: "wav" (WavPromptTts), "fake" (FakeTts), "sapi" (SapiTts, Windows),
+"say" (SayTts, macOS) and "plugin:<name>" (PluginTts, see the contract
+below). STT: "fake" (FakeStt) and "faster-whisper" (FasterWhisperStt,
+imported only when asked for, since it needs the [stt] extra).
+default_tts_name() is the engine to use when none is given: sapi on
+Windows, say on macOS, wav elsewhere.
 
 Every constructor takes only plain, picklable keyword arguments (str, int,
-float, paths, dicts): a later task builds engines inside a spawned worker
+float, paths, dicts), so an engine can be built inside a spawned worker
 process, where anything else could not cross the pickle boundary.
 
-Subprocess TTS plugin contract (for the plugin runner task): an executable
-on PATH named `voiceqa-tts-<name>` reads JSON from stdin,
-`{"text": ..., "voice": ...}`, and writes a WAV file to the path given by
-its `--out` argument. Exit 0 means success; a non-zero exit with a message
-on stderr means failure. VoiceQA never imports the plugin's code, only runs
-it as a subprocess.
+Subprocess TTS plugin contract: an executable on PATH named
+`voiceqa-tts-<name>` reads JSON from stdin, `{"text": ..., "voice": ...}`,
+and writes a WAV file to the path given by its `--out` argument. Exit 0
+means success; a non-zero exit with a message on stderr means failure.
+VoiceQA never imports the plugin's code, only runs it as a subprocess
+(voiceqa.speech.plugin_tts), with a timeout, and shows its stderr when it
+fails.
 """
+
+import sys
 
 from .fakes import FakeStt, FakeTts
 from .interfaces import SpeechToText, TextToSpeech
+from .os_tts import SapiTts, SayTts
+from .plugin_tts import PluginTts
 from .wav_prompts import WavPromptTts
 
-_TTS_ENGINES: dict[str, type[TextToSpeech]] = {"wav": WavPromptTts, "fake": FakeTts}
-_RESERVED_TTS = ("sapi", "say")
+PLUGIN_PREFIX = "plugin:"
+
+_TTS_ENGINES: dict[str, type[TextToSpeech]] = {
+    "wav": WavPromptTts,
+    "fake": FakeTts,
+    "sapi": SapiTts,
+    "say": SayTts,
+}
 
 _STT_ENGINES: dict[str, type[SpeechToText]] = {"fake": FakeStt}
+
+
+def default_tts_name() -> str:
+    if sys.platform == "win32":
+        return "sapi"
+    if sys.platform == "darwin":
+        return "say"
+    return "wav"
 
 
 def _faster_whisper(**kwargs: object) -> SpeechToText:
@@ -36,28 +54,20 @@ def _faster_whisper(**kwargs: object) -> SpeechToText:
     return FasterWhisperStt(**kwargs)
 
 
-def _reject_plugin_for_now(name: str) -> None:
-    if name.startswith("plugin:"):
-        raise NotImplementedError(
-            f"{name!r} is a plugin engine; plugin support is not implemented "
-            "until the subprocess plugin runner task"
-        )
-
-
 def create_tts(name: str, **kwargs: object) -> TextToSpeech:
-    _reject_plugin_for_now(name)
-    if name in _RESERVED_TTS:
-        raise NotImplementedError(f"TTS engine {name!r} is not implemented yet")
+    if name.startswith(PLUGIN_PREFIX):
+        return PluginTts(plugin=name[len(PLUGIN_PREFIX) :], **kwargs)
     try:
         engine = _TTS_ENGINES[name]
     except KeyError:
-        known = ", ".join(sorted(_TTS_ENGINES))
+        known = ", ".join([*sorted(_TTS_ENGINES), "plugin:<name>"])
         raise ValueError(f"unknown TTS engine {name!r}, known engines: {known}") from None
     return engine(**kwargs)
 
 
 def create_stt(name: str, **kwargs: object) -> SpeechToText:
-    _reject_plugin_for_now(name)
+    if name.startswith(PLUGIN_PREFIX):
+        raise NotImplementedError(f"{name!r}: STT plugins are not supported, only TTS plugins")
     if name == "faster-whisper":
         return _faster_whisper(**kwargs)
     try:

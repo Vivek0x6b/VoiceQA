@@ -5,7 +5,9 @@ import pytest
 import yaml
 
 from voiceqa.speech import FakeStt, FakeTts, WavPromptTts
-from voiceqa.speech.registry import create_stt, create_tts
+from voiceqa.speech.plugin_tts import PluginTts
+from voiceqa.speech.registry import create_stt, create_tts, default_tts_name
+from voiceqa.speech.tts_process import TtsError
 
 
 def test_create_tts_fake():
@@ -26,10 +28,23 @@ def test_create_stt_fake():
     assert isinstance(stt, FakeStt)
 
 
-@pytest.mark.parametrize("name", ["sapi", "say"])
-def test_create_tts_reserved_names_not_implemented(name):
-    with pytest.raises(NotImplementedError):
+@pytest.mark.parametrize(
+    ("name", "home"), [("sapi", "win32"), ("say", "darwin")], ids=["sapi", "say"]
+)
+def test_create_tts_os_engines_off_their_os_name_the_os(name, home):
+    if sys.platform == home:
+        pytest.skip(f"{name} is available on this OS")
+    with pytest.raises(TtsError, match="needs"):
         create_tts(name)
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [("win32", "sapi"), ("darwin", "say"), ("linux", "wav")],
+)
+def test_default_tts_name_per_os(monkeypatch, platform, expected):
+    monkeypatch.setattr(sys, "platform", platform)
+    assert default_tts_name() == expected
 
 
 def test_importing_the_whisper_backend_without_the_extra_names_it(monkeypatch):
@@ -46,9 +61,15 @@ def test_create_stt_faster_whisper_without_the_extra_names_it(monkeypatch):
         create_stt("faster-whisper", model="tiny.en")
 
 
-def test_create_tts_plugin_prefix_parses_but_is_not_implemented():
-    with pytest.raises(NotImplementedError, match="plugin"):
-        create_tts("plugin:kokoro")
+def test_create_tts_plugin_prefix_builds_a_plugin_engine():
+    tts = create_tts("plugin:kokoro")
+    assert isinstance(tts, PluginTts)
+    assert tts.name == "plugin:kokoro"
+
+
+def test_create_stt_rejects_plugins():
+    with pytest.raises(NotImplementedError, match="STT plugins"):
+        create_stt("plugin:whatever")
 
 
 def test_create_tts_unknown_name_lists_known_names():
