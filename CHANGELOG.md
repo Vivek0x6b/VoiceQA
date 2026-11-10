@@ -48,3 +48,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - The test agent no longer starts media when a BYE arrives right after the ACK, before media was started.
 - docs/ARCHITECTURE.md marks M1 as done and names M2 (local STT and TTS) as the current milestone.
 - docs/ARCHITECTURE.md lists the M2 issues and the decisions behind them: faster-whisper as an optional extra, WAV prompts plus OS speech engines for TTS, and neural TTS engines only as separately installed plugins for licence reasons.
+- `voiceqa.speech` package: `Speech` (int16 mono samples and rate), the `TextToSpeech` and `SpeechToText` protocols, and the `Word`, `Segment`, `Transcript` models that give transcript.json one schema.
+- `WavPromptTts`: maps text to a WAV file from a YAML index (text to file path, relative to the index file's folder) or from an in-memory mapping. Text is matched after stripping whitespace, case sensitive. Unknown text is a `ValueError` naming it, never silence. Keeps the file's own sample rate and downmixes stereo to mono.
+- `FakeTts` (tone bursts whose length follows the text) and `FakeStt` (a scripted `Transcript`, given as a `Transcript` or as plain data) for tests that need a TTS or STT engine without real speech.
+- `create_tts(name, **kwargs)` and `create_stt(name, **kwargs)`: look up an engine by name (`wav`, `fake` for now). Reserved names (`sapi`, `say`, `faster-whisper`) and any `plugin:<name>` raise `NotImplementedError` until their tasks land; any other unknown name raises `ValueError` listing the known engines.
