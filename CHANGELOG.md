@@ -41,6 +41,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Test speech fixture: 18 s of a public-domain LibriVox reading of The Gift of the Magi at 8 kHz, with utterance times, the book's text and a SOURCE.md. It also ships in the wheel for `voiceqa bench stt`.
 - Real-model tests (pytest marker `model`) run tiny.en against the fixture and check the word error rate. CI caches tiny.en, runs them on all nine jobs and adds the bench numbers to the job summary.
 - `voiceqa.speech.wer`: word error rate (word-level edit distance over reference words) with text normalised for case and punctuation, apostrophes inside words kept and numbers left as written. The real-model tests use it instead of their own copy.
+- `SttWorker` (`voiceqa.speech.worker`): runs an STT engine in a child process started with "spawn" on every OS. The engine is built in the child from its registry name and plain keyword arguments and loaded once. `transcribe()` is async and never blocks the event loop, `submit()` returns a future, `close()` lets queued jobs finish within a timeout and then terminates the child. A child that dies or an engine that fails to load fails the pending jobs with `SttWorkerError` instead of hanging.
+- `FakeStt` takes `delay` (seconds per job) and `error` (raise on every job) for testing slow and failing jobs.
 
 ### Changed
 

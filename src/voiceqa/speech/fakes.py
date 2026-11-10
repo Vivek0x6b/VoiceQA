@@ -1,5 +1,7 @@
 """Deterministic fakes for tests: no OS, model or subprocess dependencies."""
 
+import time
+
 import numpy as np
 
 from voiceqa.audio.dsp import generate_tone
@@ -46,11 +48,21 @@ class FakeStt:
 
     `transcript` is either a Transcript or plain data matching its schema
     (a dict, as model_dump() produces), so it stays picklable across a
-    registry lookup and a spawned worker process.
+    registry lookup and a spawned worker process. `delay` makes every job
+    take that many seconds and `error` makes every job raise RuntimeError
+    with that message, for testing the worker with slow or failing jobs.
     """
 
-    def __init__(self, transcript: Transcript | dict, name: str = "fake") -> None:
+    def __init__(
+        self,
+        transcript: Transcript | dict,
+        name: str = "fake",
+        delay: float = 0.0,
+        error: str | None = None,
+    ) -> None:
         self._name = name
+        self._delay = delay
+        self._error = error
         self._transcript = (
             transcript
             if isinstance(transcript, Transcript)
@@ -62,4 +74,8 @@ class FakeStt:
         return self._name
 
     def transcribe(self, samples: np.ndarray, rate: int) -> Transcript:
+        if self._delay:
+            time.sleep(self._delay)
+        if self._error is not None:
+            raise RuntimeError(self._error)
         return self._transcript

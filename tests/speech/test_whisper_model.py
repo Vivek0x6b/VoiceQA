@@ -4,15 +4,10 @@ Skipped, with the reason shown, when the [stt] extra is missing or tiny.en
 is not in the models dir. CI pulls it before the tests run.
 """
 
-import os
-
 import pytest
 
 from voiceqa.speech.bench import default_clip_dir, load_bench_clip
-from voiceqa.speech.model_cache import find_model, resolve_models_dir, stt_extra_installed
 from voiceqa.speech.wer import normalize_words, wer
-
-MODEL = "tiny.en"
 
 # Measured on Windows (faster-whisper 1.2.1): whole clip 0.128, utterances
 # 0.429, 0.0, 0.067, 0.071 (mean 0.142). The first utterance is the hard
@@ -25,22 +20,8 @@ MAX_MEAN_UTTERANCE_WER = 0.25
 pytestmark = pytest.mark.model
 
 
-def _skip_reason() -> str | None:
-    if not stt_extra_installed():
-        return "needs the [stt] extra: pip install voiceqa[stt]"
-    if find_model(MODEL, resolve_models_dir()) is None:
-        return f"{MODEL} is not in {resolve_models_dir()}; run: voiceqa models pull stt {MODEL}"
-    return None
-
-
 @pytest.fixture(scope="module")
-def stt():
-    reason = _skip_reason()
-    if reason:
-        # CI sets this so a missing model fails loudly instead of skipping.
-        if os.environ.get("VOICEQA_REQUIRE_MODEL_TESTS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
+def stt(test_model):
     from voiceqa.speech.whisper import FasterWhisperStt
 
     # CTranslate2 keeps its intra-op thread pool alive for the life of the
@@ -48,7 +29,7 @@ def stt():
     # done. cpu_threads=1 keeps that permanent footprint small instead of
     # defaulting to one thread per core, since these tests only check
     # accuracy, not speed.
-    return FasterWhisperStt(model=MODEL, cpu_threads=1)
+    return FasterWhisperStt(model=test_model, cpu_threads=1)
 
 
 @pytest.fixture(scope="module")
@@ -83,7 +64,7 @@ def test_transcript_metadata_and_word_times(stt, clip):
     duration = len(clip.samples) / clip.rate
 
     assert transcript.engine == "faster-whisper"
-    assert transcript.model == MODEL
+    assert transcript.model == "tiny.en"
     assert transcript.language == "en"
     words = [w for s in transcript.segments for w in s.words]
     assert words, "word timestamps are on by default"

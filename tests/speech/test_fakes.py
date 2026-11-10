@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from voiceqa.speech import FakeStt, FakeTts, Segment, Transcript, Word
+from voiceqa.speech import FakeStt, FakeTts, Segment, Transcript, Word, fakes
 
 
 def test_fake_tts_name_and_voices():
@@ -60,3 +61,17 @@ def test_fake_stt_ignores_the_given_audio():
     assert stt.transcribe(np.zeros(5, dtype=np.int16), 8000) == stt.transcribe(
         np.ones(500, dtype=np.int16), 44100
     )
+
+
+def test_fake_stt_delay_sleeps_before_returning(monkeypatch):
+    slept = []
+    monkeypatch.setattr(fakes.time, "sleep", slept.append)
+    stt = FakeStt(Transcript(engine="fake", model="scripted", language="en"), delay=2.5)
+    stt.transcribe(np.zeros(5, dtype=np.int16), 8000)
+    assert slept == [2.5]
+
+
+def test_fake_stt_error_raises_on_every_job():
+    stt = FakeStt(Transcript(engine="fake", model="scripted", language="en"), error="boom")
+    with pytest.raises(RuntimeError, match="boom"):
+        stt.transcribe(np.zeros(5, dtype=np.int16), 8000)
