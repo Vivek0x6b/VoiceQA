@@ -5,12 +5,12 @@ is not in the models dir. CI pulls it before the tests run.
 """
 
 import os
-import re
 
 import pytest
 
 from voiceqa.speech.bench import default_clip_dir, load_bench_clip
 from voiceqa.speech.model_cache import find_model, resolve_models_dir, stt_extra_installed
+from voiceqa.speech.wer import normalize_words, wer
 
 MODEL = "tiny.en"
 
@@ -56,34 +56,12 @@ def clip():
     return load_bench_clip(default_clip_dir())
 
 
-def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9']+", text.lower())
-
-
-def _wer(reference: str, hypothesis: str) -> float:
-    ref, hyp = _words(reference), _words(hypothesis)
-    row = list(range(len(hyp) + 1))
-    for i, r in enumerate(ref, 1):
-        prev, row[0] = row[0], i
-        for j, h in enumerate(hyp, 1):
-            prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (r != h))
-    return row[-1] / len(ref)
-
-
-def test_private_wer_helper_counts_edits_per_reference_word():
-    assert _wer("the cat sat", "the cat sat") == 0.0
-    assert _wer("the cat sat", "the bat sat") == pytest.approx(1 / 3)
-    assert _wer("the cat sat", "the cat") == pytest.approx(1 / 3)
-    assert _wer("the cat", "the cat sat down") == pytest.approx(1.0)
-    assert _wer("Della, being slender.", "della being slender") == 0.0
-
-
 def test_whole_clip_wer_is_within_bound(stt, clip):
     transcript = stt.transcribe(clip.samples, clip.rate)
     reference = " ".join(u.text for u in clip.utterances)
     hypothesis = " ".join(s.text for s in transcript.segments)
-    wer = _wer(reference, hypothesis)
-    assert wer <= MAX_CLIP_WER, f"WER {wer:.3f}: {hypothesis!r}"
+    error_rate = wer(reference, hypothesis)
+    assert error_rate <= MAX_CLIP_WER, f"WER {error_rate:.3f}: {hypothesis!r}"
 
 
 def test_each_utterance_wer_is_within_bound(stt, clip):
@@ -92,9 +70,11 @@ def test_each_utterance_wer_is_within_bound(stt, clip):
         part = clip.samples[int(u.start * clip.rate) : int(u.end * clip.rate)]
         transcript = stt.transcribe(part, clip.rate)
         hypothesis = " ".join(s.text for s in transcript.segments)
-        wer = _wer(u.text, hypothesis)
-        assert wer <= MAX_UTTERANCE_WER, f"WER {wer:.3f} for {u.text!r}: {hypothesis!r}"
-        wers.append(wer)
+        error_rate = wer(u.text, hypothesis)
+        assert error_rate <= MAX_UTTERANCE_WER, (
+            f"WER {error_rate:.3f} for {u.text!r}: {hypothesis!r}"
+        )
+        wers.append(error_rate)
     assert sum(wers) / len(wers) <= MAX_MEAN_UTTERANCE_WER, wers
 
 
@@ -119,8 +99,10 @@ def test_words_fall_in_their_utterance(stt, clip):
     transcript = stt.transcribe(clip.samples, clip.rate)
     words = [w for s in transcript.segments for w in s.words]
     for u in clip.utterances:
-        vocabulary = set(_words(u.text))
-        inside = [t for w in words if u.start - 0.5 <= w.start <= u.end for t in _words(w.text)]
+        vocabulary = set(normalize_words(u.text))
+        inside = [
+            t for w in words if u.start - 0.5 <= w.start <= u.end for t in normalize_words(w.text)
+        ]
         assert inside, u
         own = sum(t in vocabulary for t in inside)
         assert own / len(inside) >= 0.5, (u.text, inside)

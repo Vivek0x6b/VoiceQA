@@ -40,6 +40,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `voiceqa bench stt [--stt-model M] [--models-dir D] [--json]`: model load time, real-time factor and per-utterance latency on this CPU, measured on the test clip after one warm-up run. Informational only.
 - Test speech fixture: 18 s of a public-domain LibriVox reading of The Gift of the Magi at 8 kHz, with utterance times, the book's text and a SOURCE.md. It also ships in the wheel for `voiceqa bench stt`.
 - Real-model tests (pytest marker `model`) run tiny.en against the fixture and check the word error rate. CI caches tiny.en, runs them on all nine jobs and adds the bench numbers to the job summary.
+- `voiceqa.speech.wer`: word error rate (word-level edit distance over reference words) with text normalised for case and punctuation, apostrophes inside words kept and numbers left as written. The real-model tests use it instead of their own copy.
 
 ### Changed
 
