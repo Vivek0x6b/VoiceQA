@@ -45,6 +45,12 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `FakeStt` takes `delay` (seconds per job) and `error` (raise on every job) for testing slow and failing jobs.
 - `voiceqa transcribe RUN_DIR [--stt-model M] [--models-dir D]`: transcribes caller.wav and agent.wav in the STT worker and writes transcript.json, with each segment tagged `caller` or `agent`, timed on the same zero as events.json and the WAVs, and sorted by start time. Long tracks are read in blocks and sent in chunks of up to ten minutes, cut at a quiet frame. A missing `[stt]` extra or model is an error naming the fix (exit 1), and a folder without the two WAVs is exit 2.
 - `voiceqa call --transcribe [--stt-model M] [--models-dir D]`: writes transcript.json once an answered call has ended. If the transcript cannot be made, the error and its fix go to stderr and the exit code stays the call's.
+- `SapiTts` (Windows, through PowerShell and System.Speech) and `SayTts` (macOS `say`) text to speech engines, as `--tts sapi` and `--tts say`. The text never goes into a command line, so quotes, `$` or backticks in it cannot run anything.
+- `PluginTts`: runs a separately installed `voiceqa-tts-<name>` program as `--tts plugin:<name>`, following the plugin contract (JSON on stdin, WAV at `--out`). It has a timeout that kills the whole process tree, and shows the plugin's stderr when it fails.
+- Per-user cache of synthesized speech, keyed by engine, voice and text, in `%LOCALAPPDATA%/voiceqa/cache/tts`, `~/Library/Caches/voiceqa/tts` or `~/.cache/voiceqa/tts` (`VOICEQA_CACHE_DIR` moves it). Written atomically, so two runs never read a half-written file.
+- `voiceqa say TEXT -o OUT.wav [--tts NAME] [--voice V] [--prompts INDEX]` to try a voice, and `voiceqa say --list-voices`.
+- `voiceqa call --say TEXT` speaks the text once the call is answered, instead of the tone or a WAV. The speech is made before dialing, so a TTS failure never costs a call. The default engine is sapi on Windows, say on macOS and wav prompts elsewhere.
+- docs/ARCHITECTURE.md: M2 issue 4 is done, with the TTS engine, plugin runner and cache decisions and their known problems.
 - docs/ARCHITECTURE.md: M2 issue 3 is done; the worker process, transcript.json and WER decisions are written down, along with how far off faster-whisper's word start times are.
 
 ### Changed
@@ -65,6 +71,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `FakeTts` (tone bursts whose length follows the text) and `FakeStt` (a scripted `Transcript`, given as a `Transcript` or as plain data) for tests that need a TTS or STT engine without real speech.
 - `create_tts(name, **kwargs)` and `create_stt(name, **kwargs)`: look up an engine by name (`wav`, `fake` for now). Reserved names (`sapi`, `say`, `faster-whisper`) and any `plugin:<name>` raise `NotImplementedError` until their tasks land; any other unknown name raises `ValueError` listing the known engines.
 - `run_call` resolves the SIP server once and hands the address to `place_call` (new `server` argument and public `resolve_server`), instead of looking it up a second time. An unresolvable server now reads "cannot resolve SIP server HOST: ..." in the call summary.
+
+- `create_tts("sapi")`, `create_tts("say")` and `create_tts("plugin:<name>")` now build engines instead of raising `NotImplementedError`. An OS engine on the wrong OS raises `TtsError`. `create_stt("plugin:<name>")` still raises `NotImplementedError`, since there are no STT plugins.
 
 ### Fixed
 
