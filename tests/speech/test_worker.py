@@ -53,9 +53,9 @@ def fake_worker(**kwargs) -> SttWorker:
     return SttWorker("fake", transcript=SCRIPTED.model_dump(), **kwargs)
 
 
-def run(coro):
+def run(coro, bound=WAIT):
     async def bounded():
-        return await asyncio.wait_for(coro, WAIT)
+        return await asyncio.wait_for(coro, bound)
 
     return asyncio.run(bounded())
 
@@ -118,11 +118,12 @@ def test_close_fails_jobs_still_pending_when_the_timeout_runs_out(clip):
 
 
 def test_leaving_the_with_block_on_an_error_does_not_wait_for_jobs(clip):
-    started = time.perf_counter()
     with pytest.raises(KeyboardInterrupt):
         with fake_worker(delay=60) as worker:
             run(worker.wait_ready())
             job = worker.submit(*clip)
+            # Only the close path is timed, not spawn start-up.
+            started = time.perf_counter()
             raise KeyboardInterrupt
     # close() would give the job DEFAULT_CLOSE_TIMEOUT (10 s) to finish on a
     # normal exit; on an error it stops the child straight away.
@@ -214,7 +215,8 @@ def test_tiny_en_in_the_worker(test_model):
         async with SttWorker("faster-whisper", model=test_model, cpu_threads=1) as worker:
             return await worker.transcribe(clip.samples, clip.rate)
 
-    transcript = run(main())
+    # Spawn, model load and the whole clip: a hang guard, not a speed check.
+    transcript = run(main(), bound=60)
 
     assert transcript.engine == "faster-whisper"
     assert transcript.model == test_model
