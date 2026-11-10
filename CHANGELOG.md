@@ -52,6 +52,9 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Per-user cache of synthesized speech, keyed by engine, voice and text, in `%LOCALAPPDATA%/voiceqa/cache/tts`, `~/Library/Caches/voiceqa/tts` or `~/.cache/voiceqa/tts` (`VOICEQA_CACHE_DIR` moves it). Written atomically, so two runs never read a half-written file.
 - `voiceqa say TEXT -o OUT.wav [--tts NAME] [--voice V] [--prompts INDEX]` to try a voice, and `voiceqa say --list-voices`.
 - `voiceqa call --say TEXT` speaks the text once the call is answered, instead of the tone or a WAV. The speech is made before dialing, so a TTS failure never costs a call. The default engine is sapi on Windows, say on macOS and wav prompts elsewhere.
+- Speech loopback end-to-end test: `voiceqa agent` (echo) and `voiceqa call --say ... --transcribe --stt-model tiny.en` run as subprocesses, and the caller and agent transcripts must match the spoken text within a word error rate bound. It speaks with sapi on Windows, say on macOS and a WAV prompt cut from the LibriVox fixture on Linux, and runs with the other real-model tests in CI.
+- README: speech setup (the `[stt]` extra, `voiceqa models pull`, model choice and sizes, `voiceqa bench stt`), text to speech with the OS engines and WAV prompts, `voiceqa say`, `voiceqa call --say --transcribe`, `voiceqa transcribe`, the TTS plugin contract, and why Piper and Kokoro can only be plugins.
+- docs/ARCHITECTURE.md: M2 is done. New "Speech interface" section next to "Media interface", the loopback test and help markup decisions, and M3 (YAML scenario engine) as the next milestone, which takes over live per-turn STT with end-of-turn detection.
 - docs/ARCHITECTURE.md: M2 issue 4 is done, with the TTS engine, plugin runner and cache decisions and their known problems.
 - docs/ARCHITECTURE.md: M2 issue 3 is done; the worker process, transcript.json and WER decisions are written down, along with how far off faster-whisper's word start times are.
 
@@ -80,3 +83,4 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - `test_reinvite_mid_call_does_not_interrupt_the_echo` counted silence frames slipped into the echo and failed on one CI job under load. It now checks energy only, matching the already-accepted contract that the agent may slip a silence frame into the echo when its queue runs dry for a slot (see `test_recording_of_an_echo_call_lines_up_on_one_clock`).
 - The real-model STT tests load tiny.en with `cpu_threads=1` instead of the faster-whisper default, so the test process keeps fewer CTranslate2 worker threads alive after the model tests finish (that thread pool has no release call, so it stays for the rest of the pytest run).
+- `voiceqa call --help` lost the word "[stt]" (it read "needs the  extra") because Rich took it for a style tag. It is escaped now, and a test checks every bracketed word in every command's help.
