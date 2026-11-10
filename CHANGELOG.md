@@ -62,3 +62,4 @@ All notable changes to this project are recorded here. The format follows [Keep 
 ### Fixed
 
 - `test_reinvite_mid_call_does_not_interrupt_the_echo` counted silence frames slipped into the echo and failed on one CI job under load. It now checks energy only, matching the already-accepted contract that the agent may slip a silence frame into the echo when its queue runs dry for a slot (see `test_recording_of_an_echo_call_lines_up_on_one_clock`).
+- The real-model STT tests load tiny.en with `cpu_threads=1` instead of the faster-whisper default, so the test process keeps fewer CTranslate2 worker threads alive after the model tests finish (that thread pool has no release call, so it stays for the rest of the pytest run).

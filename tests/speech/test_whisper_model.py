@@ -43,7 +43,12 @@ def stt():
         pytest.skip(reason)
     from voiceqa.speech.whisper import FasterWhisperStt
 
-    return FasterWhisperStt(model=MODEL)
+    # CTranslate2 keeps its intra-op thread pool alive for the life of the
+    # process; there is no API that releases it once this module's tests are
+    # done. cpu_threads=1 keeps that permanent footprint small instead of
+    # defaulting to one thread per core, since these tests only check
+    # accuracy, not speed.
+    return FasterWhisperStt(model=MODEL, cpu_threads=1)
 
 
 @pytest.fixture(scope="module")
