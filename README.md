@@ -36,7 +36,17 @@ voiceqa version
 voiceqa doctor
 ```
 
-`voiceqa doctor` prints your Python version and whether ffmpeg is on your PATH.
+`voiceqa doctor` prints your Python version, whether ffmpeg is on your PATH, whether speech-to-text is installed, and which STT models are on disk.
+
+Speech-to-text (faster-whisper) is an optional extra. Install it and download a model ahead of time:
+
+```
+pip install -e ".[dev,stt]"
+voiceqa models pull stt base.en
+voiceqa bench stt
+```
+
+Models go to the Hugging Face cache unless you pass `--models-dir` or set `VOICEQA_MODELS_DIR`. `base.en` (148 MB) is the default. `small.en` (486 MB) is clearly better on 8 kHz phone audio but needs more CPU time. `voiceqa bench stt` shows how fast a model runs on your CPU.
 
 ## Quick start
 

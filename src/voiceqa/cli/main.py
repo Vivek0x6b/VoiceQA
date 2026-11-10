@@ -15,10 +15,36 @@ from voiceqa import __version__
 from voiceqa.audio.dsp import generate_tone
 from voiceqa.engine.calibrate import CalibrationResult, run_calibration
 from voiceqa.engine.call import CallResult, run_call
+from voiceqa.speech import model_cache
+from voiceqa.speech.bench import default_clip_dir, load_bench_clip, run_stt_bench
+from voiceqa.speech.model_cache import (
+    KNOWN_SIZES_MB,
+    ModelNotAvailableError,
+    SttExtraMissingError,
+    cached_models,
+    find_model,
+    models_dir_source,
+    pull_stt_model,
+    repo_id,
+    resolve_models_dir,
+)
 from voiceqa.telephony.local.agent import AgentConfig, LocalAgent, load_prompt
 from voiceqa.telephony.media import PayloadType
 
 app = typer.Typer(help="Local-first QA lab for AI voice agents.", no_args_is_help=True)
+models_app = typer.Typer(help="List and download speech models.", no_args_is_help=True)
+bench_app = typer.Typer(help="Measure speech engine speed on this machine.", no_args_is_help=True)
+app.add_typer(models_app, name="models")
+app.add_typer(bench_app, name="bench")
+
+ModelsDirOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--models-dir",
+        help="Model folder (Hugging Face cache layout). Default: VOICEQA_MODELS_DIR, "
+        "else the Hugging Face cache.",
+    ),
+]
 
 DEFAULT_SIP_PORT = 5060
 DEFAULT_TONE_HZ = 440
@@ -43,12 +69,154 @@ def version() -> None:
     typer.echo(f"voiceqa {__version__}")
 
 
+def _faster_whisper_version() -> str:
+    from importlib.metadata import version as dist_version
+
+    return dist_version("faster-whisper")
+
+
+def _size(size_bytes: int) -> str:
+    return f"{size_bytes / 1_000_000:.1f} MB"
+
+
+def _echo_models_dir(models_dir: Path | None) -> None:
+    _doctor_line(
+        "models dir:", f"{resolve_models_dir(models_dir)} ({models_dir_source(models_dir)})"
+    )
+
+
+def _echo_cached_models(models_dir: Path | None) -> None:
+    found = cached_models(models_dir)
+    if not found:
+        _doctor_line("stt models:", "none cached")
+    for m in found:
+        _doctor_line("stt model:", f"{m.name:<10} {_size(m.size_bytes):>10}  {m.path}")
+
+
 @app.command()
-def doctor() -> None:
+def doctor(models_dir: ModelsDirOption = None) -> None:
     """Check the local environment."""
     typer.echo(f"python: {platform.python_version()}")
     ffmpeg = shutil.which("ffmpeg")
     typer.echo(f"ffmpeg: found ({ffmpeg})" if ffmpeg else "ffmpeg: not found")
+    if model_cache.stt_extra_installed():
+        _doctor_line("stt extra:", f"installed (faster-whisper {_faster_whisper_version()})")
+    else:
+        _doctor_line("stt extra:", f"not installed ({model_cache.STT_EXTRA_HINT})")
+    _echo_models_dir(models_dir)
+    _echo_cached_models(models_dir)
+
+
+class ModelKind(StrEnum):
+    stt = "stt"
+
+
+@models_app.command("list")
+def models_list(models_dir: ModelsDirOption = None) -> None:
+    """Show cached faster-whisper models with their size and path."""
+    _echo_models_dir(models_dir)
+    found = cached_models(models_dir)
+    if not found:
+        typer.echo("no faster-whisper models cached")
+    for m in found:
+        typer.echo(f"{m.name:<12} {_size(m.size_bytes):>10}  {m.path}")
+
+
+def _check_model_name(model: str) -> None:
+    try:
+        repo_id(model)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from None
+
+
+def _download_message(model: str, models_dir: Path | None) -> str:
+    size = f" ({KNOWN_SIZES_MB[model]} MB)" if model in KNOWN_SIZES_MB else ""
+    return (
+        f"downloading faster-whisper model {model}{size} from Hugging Face "
+        f"into {resolve_models_dir(models_dir)}"
+    )
+
+
+def _pull(model: str, models_dir: Path | None) -> Path:
+    try:
+        return pull_stt_model(model, resolve_models_dir(models_dir))
+    except (SttExtraMissingError, ModelNotAvailableError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
+
+
+@models_app.command("pull")
+def models_pull(
+    kind: Annotated[ModelKind, typer.Argument(help="Model kind. Only stt for now.")],
+    model: Annotated[str, typer.Argument(help="Model name, for example base.en.")],
+    models_dir: ModelsDirOption = None,
+) -> None:
+    """Download a model now, so nothing is downloaded later during a run."""
+    _check_model_name(model)
+    existing = find_model(model, resolve_models_dir(models_dir))
+    if existing is not None:
+        typer.echo(f"{model} already cached at {existing}")
+        return
+    if not model_cache.stt_extra_installed():
+        typer.echo(
+            f"error: downloading STT models needs the [stt] extra: {model_cache.STT_EXTRA_HINT}",
+            err=True,
+        )
+        raise typer.Exit(1)
+    typer.echo(_download_message(model, models_dir))
+    path = _pull(model, models_dir)
+    typer.echo(f"{model} saved at {path}")
+
+
+def _bench_engine(model: str, models_dir: Path):
+    from voiceqa.speech.whisper import FasterWhisperStt
+
+    return FasterWhisperStt(model=model, models_dir=models_dir)
+
+
+@bench_app.command("stt")
+def bench_stt(
+    stt_model: Annotated[str, typer.Option("--stt-model", help="faster-whisper model.")] = (
+        "base.en"
+    ),
+    models_dir: ModelsDirOption = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON instead of text.")] = False,
+) -> None:
+    """Time STT on this CPU with the LibriVox test clip (informational only).
+
+    Reports model load time, real-time factor for the whole clip (processing
+    time / audio length) and per-utterance latency. One warm-up run is not
+    counted.
+    """
+    _check_model_name(stt_model)
+    if not model_cache.stt_extra_installed():
+        typer.echo(
+            f"error: bench stt needs the [stt] extra: {model_cache.STT_EXTRA_HINT}", err=True
+        )
+        raise typer.Exit(1)
+    directory = resolve_models_dir(models_dir)
+    if find_model(stt_model, directory) is None:
+        typer.echo(_download_message(stt_model, models_dir), err=True)
+        _pull(stt_model, models_dir)
+
+    clip = load_bench_clip(default_clip_dir())
+    result = run_stt_bench(
+        lambda: _bench_engine(stt_model, directory),
+        clip,
+        engine_name="faster-whisper",
+        model=stt_model,
+    )
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+        return
+    _bench_line("engine", f"{result.engine} {result.model}")
+    _bench_line("audio", f"{result.audio_seconds:.1f} s, {result.utterances} utterances")
+    _bench_line("model load", f"{result.load_seconds:.2f} s")
+    _bench_line("real-time factor", f"{result.rtf:.3f} ({result.clip_seconds:.2f} s for the clip)")
+    _bench_line("utterance median", f"{result.utterance_median_ms:.0f} ms")
+    _bench_line("utterance p95", f"{result.utterance_p95_ms:.0f} ms")
+    _bench_line("utterance max", f"{result.utterance_max_ms:.0f} ms")
 
 
 @app.command()
@@ -115,8 +283,16 @@ def _positive(value: float) -> float:
     return value
 
 
-def _line(label: str, value: str) -> None:
-    typer.echo(f"{label:<14}{value}")
+def _line(label: str, value: str, width: int = 14) -> None:
+    typer.echo(f"{label:<{width}}{value}")
+
+
+def _doctor_line(label: str, value: str) -> None:
+    _line(label, value, width=15)
+
+
+def _bench_line(label: str, value: str) -> None:
+    _line(label, value, width=18)
 
 
 def _not_answered_detail(status: int | None, reason: str | None) -> str:
