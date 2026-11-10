@@ -36,8 +36,11 @@ class AsyncStt(Protocol):
 
 
 def _wav_rate(path: Path) -> int:
-    with wave.open(str(path), "rb") as w:
-        return w.getframerate()
+    try:
+        with wave.open(str(path), "rb") as w:
+            return w.getframerate()
+    except wave.Error as e:
+        raise ValueError(f"{path}: not a PCM WAV file ({e})") from e
 
 
 def _quiet_cut(samples: np.ndarray, end: int, window: int, frame: int) -> int:

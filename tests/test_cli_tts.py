@@ -85,6 +85,15 @@ def test_say_writes_the_engine_output_to_a_wav(tmp_path):
     assert str(out) in result.output
 
 
+def test_say_cannot_write_into_a_missing_folder(tmp_path):
+    out = tmp_path / "nope" / "out.wav"
+    result = runner.invoke(app, ["say", "hello world", "-o", str(out), "--tts", "fake"])
+
+    assert result.exit_code == 1
+    assert str(out) in result.stderr
+    assert not out.exists()
+
+
 def test_say_with_wav_prompts(tmp_path, prompts):
     out = tmp_path / "out.wav"
     result = runner.invoke(
@@ -102,6 +111,21 @@ def test_say_wav_without_a_prompt_for_the_text(tmp_path, prompts):
     )
     assert result.exit_code == 1
     assert "no WAV prompt for text 'Bye.'" in result.stderr
+    assert not (tmp_path / "o.wav").exists()
+
+
+def test_say_wav_prompt_file_missing_on_disk(tmp_path):
+    folder = tmp_path / "prompts"
+    folder.mkdir()
+    index = folder / "index.yaml"
+    index.write_text(yaml.safe_dump({"Hi there.": "missing.wav"}), encoding="utf-8")
+
+    out = tmp_path / "o.wav"
+    result = runner.invoke(
+        app, ["say", "Hi there.", "-o", str(out), "--tts", "wav", "--prompts", str(index)]
+    )
+    assert result.exit_code == 1
+    assert "missing.wav" in result.stderr
     assert not (tmp_path / "o.wav").exists()
 
 
