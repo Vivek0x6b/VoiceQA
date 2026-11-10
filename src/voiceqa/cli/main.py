@@ -10,14 +10,17 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
 
 from voiceqa import __version__
-from voiceqa.audio.dsp import generate_tone
+from voiceqa.audio.dsp import generate_tone, resample
+from voiceqa.audio.wav import write_wav
 from voiceqa.engine.calibrate import CalibrationResult, run_calibration
 from voiceqa.engine.call import CallResult, run_call
 from voiceqa.engine.transcribe import TRACKS, transcribe_run, write_transcript
 from voiceqa.speech import model_cache
 from voiceqa.speech.bench import default_clip_dir, load_bench_clip, run_stt_bench
+from voiceqa.speech.interfaces import Speech, TextToSpeech
 from voiceqa.speech.model_cache import (
     KNOWN_SIZES_MB,
     STT_EXTRA_HINT,
@@ -31,9 +34,12 @@ from voiceqa.speech.model_cache import (
     resolve_models_dir,
 )
 from voiceqa.speech.models import Transcript
+from voiceqa.speech.registry import create_tts, default_tts_name
+from voiceqa.speech.tts_cache import CachedTts
+from voiceqa.speech.tts_process import TtsError
 from voiceqa.speech.worker import SttWorker, SttWorkerError
 from voiceqa.telephony.local.agent import AgentConfig, LocalAgent, load_prompt
-from voiceqa.telephony.media import PayloadType
+from voiceqa.telephony.media import SAMPLE_RATE, PayloadType
 
 app = typer.Typer(help="Local-first QA lab for AI voice agents.", no_args_is_help=True)
 models_app = typer.Typer(help="List and download speech models.", no_args_is_help=True)
@@ -283,6 +289,112 @@ def transcribe(
         typer.echo(f"{s.start:8.2f}  {s.speaker:<6}  {s.text}")
 
 
+TtsOption = Annotated[
+    str | None,
+    typer.Option(
+        "--tts",
+        help="TTS engine: sapi, say, wav, fake or plugin:<name>. "
+        "Default: sapi on Windows, say on macOS, wav elsewhere.",
+    ),
+]
+VoiceOption = Annotated[str | None, typer.Option("--voice", help="Voice name for the engine.")]
+PromptsOption = Annotated[
+    Path | None,
+    typer.Option("--prompts", help="YAML index of text to WAV files, for --tts wav."),
+]
+
+# Engines whose output is not worth caching: WAV prompts already are files,
+# and the fake engine is instant.
+_UNCACHED_TTS = ("wav", "fake")
+
+
+def _bad_option(message: str) -> typer.Exit:
+    typer.echo(f"error: {message}", err=True)
+    return typer.Exit(2)
+
+
+def _tts_engine(tts: str | None, prompts: Path | None, wav_hint: str) -> TextToSpeech:
+    """Build the TTS engine the options ask for. Problems with the options
+    themselves (unknown engine, an OS engine on the wrong OS, wav without an
+    index) exit 2."""
+    name = tts or default_tts_name()
+    if name == "wav":
+        if prompts is None:
+            if tts is None:
+                raise _bad_option(
+                    "the default TTS engine here is wav prompts (no OS speech engine on "
+                    f"this OS). {wav_hint}"
+                )
+            raise _bad_option(f"--tts wav needs an index of prompts. {wav_hint}")
+        try:
+            return create_tts("wav", index=prompts)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            raise _bad_option(f"cannot read prompts {prompts}: {exc}") from None
+    if prompts is not None:
+        raise _bad_option("--prompts is only used with --tts wav")
+    try:
+        engine = create_tts(name)
+    except (ValueError, TtsError) as exc:
+        raise _bad_option(str(exc)) from None
+    return engine if name in _UNCACHED_TTS else CachedTts(engine)
+
+
+def _synthesize(engine: TextToSpeech, text: str, voice: str | None) -> Speech:
+    try:
+        speech = engine.synthesize(text, voice)
+    except (TtsError, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    if len(speech.samples) == 0:
+        typer.echo(f"error: TTS engine {engine.name} returned no audio", err=True)
+        raise typer.Exit(1)
+    return speech
+
+
+def _check_text(text: str) -> None:
+    if not text.strip():
+        raise _bad_option("the text to speak is empty")
+
+
+@app.command()
+def say(
+    text: Annotated[str | None, typer.Argument(help="Text to speak.")] = None,
+    out: Annotated[Path | None, typer.Option("-o", "--out", help="WAV file to write.")] = None,
+    tts: TtsOption = None,
+    voice: VoiceOption = None,
+    prompts: PromptsOption = None,
+    list_voices: Annotated[
+        bool, typer.Option("--list-voices", help="Print the engine's voice names and exit.")
+    ] = False,
+) -> None:
+    """Speak TEXT with a TTS engine into a WAV file, to try a voice.
+
+    The WAV keeps the engine's own sample rate. Results from OS engines and
+    plugins are cached per user (VOICEQA_CACHE_DIR to move the cache), so
+    asking again for the same text and voice is instant.
+    """
+    hint = "Pass --prompts INDEX.yaml with a WAV for this text."
+    if list_voices:
+        engine = _tts_engine(tts, prompts, hint)
+        try:
+            names = engine.voices()
+        except TtsError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1) from None
+        for name in names:
+            typer.echo(name)
+        return
+    if text is None or out is None:
+        raise _bad_option("give the TEXT to speak and -o OUT.wav (or --list-voices)")
+    _check_text(text)
+    engine = _tts_engine(tts, prompts, hint)
+    speech = _synthesize(engine, text, voice)
+    write_wav(out, speech.samples, speech.rate)
+    _line("engine", engine.name)
+    _line("audio", f"{len(speech.samples) / speech.rate:.2f} s at {speech.rate} Hz")
+    _line("saved", str(out))
+
+
 @app.command()
 def agent(
     host: Annotated[str, typer.Option(help="Address to listen on for SIP and RTP.")] = "127.0.0.1",
@@ -412,6 +524,13 @@ def call(
     ] = False,
     stt_model: SttModelOption = "base.en",
     models_dir: ModelsDirOption = None,
+    say_text: Annotated[
+        str | None,
+        typer.Option("--say", help="Speak this text once answered, instead of the tone or WAV."),
+    ] = None,
+    tts: TtsOption = None,
+    voice: VoiceOption = None,
+    prompts: PromptsOption = None,
 ) -> None:
     """Place one call, send audio, and record both sides.
 
@@ -419,11 +538,21 @@ def call(
     VOICEQA_SIP_PASSWORD environment variable, never from a command line
     option, so it never ends up in shell history.
 
+    With --say, the text is synthesized before dialing, so a TTS problem
+    never costs a call: it exits 2 for bad TTS options and 1 when the
+    engine fails, without calling.
+
     With --transcribe, the recording is transcribed once the call is over.
     The exit code is still the call's: if the transcript cannot be made
     (no [stt] extra, model not downloaded), the error and its fix are
     printed and no transcript.json is written.
     """
+    if say_text is not None and play is not None:
+        raise _bad_option("use either --say or --play, not both")
+    if say_text is None and (tts is not None or voice is not None or prompts is not None):
+        raise _bad_option("--tts, --voice and --prompts only apply together with --say")
+    if say_text is not None:
+        _check_text(say_text)
     if transcribe:
         _check_model_name(stt_model)
     if "@" in target and not target.startswith(("sip:", "sips:")):
@@ -447,15 +576,22 @@ def call(
             raise typer.Exit(2)
         server_host, server_port = parsed
 
-    try:
-        audio = (
-            load_prompt(play)
-            if play is not None
-            else generate_tone(DEFAULT_TONE_HZ, DEFAULT_TONE_SECONDS)
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(2) from None
+    if say_text is not None:
+        hint = "Pass --prompts INDEX.yaml with a WAV for this text, or --play a WAV file."
+        engine = _tts_engine(tts, prompts, hint)
+        speech = _synthesize(engine, say_text, voice)
+        audio = resample(speech.samples, speech.rate, SAMPLE_RATE)
+        _line("tts", f"{engine.name}, {len(speech.samples) / speech.rate:.2f} s of speech")
+    else:
+        try:
+            audio = (
+                load_prompt(play)
+                if play is not None
+                else generate_tone(DEFAULT_TONE_HZ, DEFAULT_TONE_SECONDS)
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(2) from None
 
     directory = record_dir or Path("runs") / datetime.now().strftime("%Y%m%d-%H%M%S")
     password = os.environ.get("VOICEQA_SIP_PASSWORD", "")
