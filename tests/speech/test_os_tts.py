@@ -97,6 +97,64 @@ def test_parse_say_voices_handles_every_column_width():
     ]
 
 
+SAY_VOICES_OUTPUT = (
+    b"Albert              en_US    # Hello! My name is Albert.\n"
+    b"Eddy (English (UK)) en_GB    # Hello! My name is Eddy.\n"
+    b"Samantha            en_US    # Hello, my name is Samantha.\n"
+)
+
+
+@pytest.fixture
+def fake_say(monkeypatch):
+    """SayTts on any OS, with `say` replaced by a fake that records its
+    arguments, answers `-v ?` with SAY_VOICES_OUTPUT and writes a short WAV."""
+    from voiceqa.audio.dsp import generate_tone
+    from voiceqa.audio.wav import write_wav
+    from voiceqa.speech import os_tts
+
+    calls = []
+
+    def run(args, *, label, stdin=b"", timeout=0, env=None):
+        calls.append(list(args))
+        if args[1:] == ["-v", "?"]:
+            return SAY_VOICES_OUTPUT
+        out = args[args.index("-o") + 1]
+        write_wav(out, generate_tone(300, 0.2, sample_rate=OUTPUT_RATE), OUTPUT_RATE)
+        return b""
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os_tts, "run_tts_process", run)
+    return calls
+
+
+def test_say_unknown_voice_is_rejected_before_speaking(fake_say):
+    with pytest.raises(TtsError) as exc_info:
+        SayTts().synthesize("hello", voice="No Such Voice")
+    message = str(exc_info.value)
+    assert "No Such Voice" in message
+    assert "voiceqa say --list-voices" in message
+    # Only the voice list was asked for; nothing was synthesized.
+    assert fake_say == [["say", "-v", "?"]]
+
+
+def test_say_voice_match_is_exact_and_suggests_the_right_case(fake_say):
+    with pytest.raises(TtsError, match="did you mean 'Samantha'"):
+        SayTts().synthesize("hello", voice="samantha")
+
+
+def test_say_known_voice_is_passed_to_say(fake_say):
+    speech = SayTts().synthesize("hello", voice="Eddy (English (UK))")
+    assert speech.rate == OUTPUT_RATE
+    args = fake_say[-1]
+    assert args[args.index("-v") + 1] == "Eddy (English (UK))"
+
+
+def test_say_without_a_voice_skips_the_voice_list(fake_say):
+    SayTts().synthesize("hello")
+    assert len(fake_say) == 1
+    assert "-v" not in fake_say[0]
+
+
 @macos_only
 def test_say_speaks_a_sentence():
     tts = create_tts("say")

@@ -151,6 +151,19 @@ class SayTts:
         out = run_tts_process(["say", "-v", "?"], label="say voice list", timeout=self._timeout)
         return parse_say_voices(out.decode("utf-8", "replace"))
 
+    def _check_voice(self, voice: str) -> None:
+        """`say -v <unknown>` speaks with the default voice and exits 0, so the
+        name is checked against `say -v ?` first. The match is exact, the same
+        as the cache key, so one voice never gets two cache entries."""
+        names = self.voices()
+        if voice in names:
+            return
+        message = f"say has no voice {voice!r}"
+        same_but_case = [n for n in names if n.casefold() == voice.casefold()]
+        if same_but_case:
+            message += f", did you mean {same_but_case[0]!r}?"
+        raise TtsError(f"{message}. See the voices with: voiceqa say --list-voices --tts say")
+
     def synthesize(self, text: str, voice: str | None = None) -> Speech:
         with tempfile.TemporaryDirectory(prefix="voiceqa-say-") as tmp:
             text_path = Path(tmp) / "text.txt"
@@ -166,6 +179,7 @@ class SayTts:
                 str(text_path),
             ]
             if voice:
+                self._check_voice(voice)
                 args[1:1] = ["-v", voice]
             run_tts_process(args, label="say", timeout=self._timeout)
             return read_speech_wav(out, "say")
