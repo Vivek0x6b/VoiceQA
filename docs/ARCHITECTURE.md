@@ -4,7 +4,7 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 
 ## Current status
 
-- Current milestone: M2 (local STT and TTS), being planned. No M2 issue has started.
+- Current milestone: M2 (local STT and TTS). The plan is settled, no M2 issue has started. Issues: 1 speech interfaces, fakes and WAV prompts; 2 faster-whisper STT backend; 3 call transcripts and `voiceqa transcribe`; 4 OS TTS engines and the plugin runner; 5 loopback check and docs.
 - M1 (local SIP call with two-way audio and recording) is done. All seven issues are finished and CI passes on Windows, macOS and Linux for Python 3.11 to 3.13. What M1 gives: `voiceqa agent` (a local echo or WAV playback agent), `voiceqa call` (one SIP call with recording of both sides and events.json) and `voiceqa calibrate` (VoiceQA's own round-trip floor). Its limits are listed under known problems below.
 - Finished M1 issues: issue 1 (G.711 codec and WAV I/O), issue 2 (RTP sender and receiver with 20 ms pacing), issue 3 (SIP UAC with INVITE, ACK, BYE, digest auth and SDP offer/answer), issue 4 (local test agent), issue 5 (recording both directions on a shared clock), issue 6 (`voiceqa call` and `voiceqa calibrate` commands, plus an end-to-end subprocess test in CI and a README quick start), issue 7 (session refresh, INVITEs without an SDP offer, and CANCEL before the agent answers). The project scaffold, CLI (`version`, `doctor`) and CI were done before that.
 - M1 issues:
@@ -15,7 +15,7 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
   5. Recording both directions on a shared clock: caller.wav, agent.wav and a stereo mix, plus events.json with timestamps for INVITE sent, ringing, answered, first RTP in, first RTP out and BYE. Done.
   6. `voiceqa call` and `voiceqa calibrate` commands, an end-to-end subprocess test in CI, and a README quick start. Done.
   7. Session refresh: answer an in-dialog re-INVITE or UPDATE with 200 OK and the current SDP instead of 488. Also handle INVITEs without an SDP offer, which some providers send: put our offer in the 200 OK and take the answer from the ACK. Done, along with CANCEL handling in the test agent and `voiceqa agent --answer-delay`.
-- Next issue: M2 issue 1, speech interfaces (text to speech and speech to text) with fake engines for tests. The TTS engine is still open: Piper is GPL-3.0 and many neural TTS stacks need espeak-ng (also GPL-3.0) for phonemes, so the licenses have to be checked first.
+- Next issue: M2 issue 1, speech interfaces (text to speech and speech to text), fake engines for tests, and WAV prompts.
 - Known problems:
   - A session refresh (re-INVITE or UPDATE) is answered with 200 and the SDP we sent before, and media keeps running as it was. A re-INVITE that changes the far end's address, port or codec still gets our current SDP, and our media is not re-pointed to the new address. Session timers (RFC 4028) are not supported: a refresh with Session-Expires gets a plain 200.
   - A 200 to a refresh that never gets its ACK is only resent until 64 * T1, then dropped. No BYE is sent, though RFC 3261 says the UAS should send one.
@@ -49,6 +49,12 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 - `CallRecorder` (`telephony/recording.py`) streams each side to its own WAV as frames arrive. Frames wait 100 ms for reordered packets, then are written. A frame within half a frame of the end of the track is appended, a later one is preceded by silence, an earlier one is dropped and counted. Silence for long gaps is written in 1 s blocks. When the call ends both tracks are padded to the same length, mix.wav is built from the two files a second at a time, and events.json is written. Memory stays flat however long the call is. The WAV header is fixed after every write, so the files are valid even if the process dies mid-call (mix.wav and events.json are only written at the end).
 - Call events come from `place_call(on_event=...)`, so SIP still knows nothing about recording. events.json times are seconds since the recorder was created, the same zero as sample 0 of every WAV. Events are invite_sent, ringing, answered, call_rejected (final failure status and reason), bye_sent and bye_received.
 - The test agent does not record.
+- Speech engines sit behind two small interfaces: text to speech returns int16 mono samples with their rate, speech to text returns a transcript of timed segments and words. Engines are picked by name, so the CLI and later YAML scenarios choose them with a string.
+- STT is faster-whisper, installed with the optional `[stt]` extra so the core install stays small. Default model `base.en` (148 MB), changed with `--stt-model`. `small.en` (486 MB) is better on 8 kHz phone audio but slower on CPU. Models live in the Hugging Face cache unless `--models-dir` says otherwise, and are only downloaded when the user asks or on first use with a message.
+- TTS in M2 is WAV prompts on every OS, plus the OS engine on Windows (SAPI) and macOS (`say`). Linux uses WAV prompts only. No espeak-ng.
+- Neural TTS engines (Kokoro, Piper) can only be added as separately installed plugins that VoiceQA runs as a subprocess and never imports. Piper is GPL-3.0. Kokoro itself is Apache-2.0 and its English pipeline runs without espeak-ng (it uses it only for words missing from its dictionary, and drops those words without it), but installing it pulls in `phonemizer-fork` (GPLv3+) and `espeakng-loader`, which ships the espeak-ng library (GPL-3.0). Checked on 2026-11-09 against kokoro 0.9.4 and misaki 0.9.4.
+- CI caches the `tiny.en` model (78 MB) and runs the real-model STT tests on all three OSes.
+- Test speech is a public-domain LibriVox clip, downsampled to 8 kHz, with its source and licence noted next to it in the repo.
 
 ## Media interface
 

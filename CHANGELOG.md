@@ -47,3 +47,4 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - The test agent honours CANCEL before it answers: 200 to the CANCEL, 487 to the INVITE (resent until its ACK), media closed, no call. A CANCEL after the answer still gets 200 and changes nothing.
 - The test agent no longer starts media when a BYE arrives right after the ACK, before media was started.
 - docs/ARCHITECTURE.md marks M1 as done and names M2 (local STT and TTS) as the current milestone.
+- docs/ARCHITECTURE.md lists the M2 issues and the decisions behind them: faster-whisper as an optional extra, WAV prompts plus OS speech engines for TTS, and neural TTS engines only as separately installed plugins for licence reasons.
