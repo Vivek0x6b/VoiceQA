@@ -39,7 +39,9 @@ def _left(before: dict, after: dict) -> dict:
             extra = value - before[key]
             if extra:
                 left[key] = sorted(extra)
-        elif value != before[key]:
+        elif value > before[key]:
+            # Only a rise is ours: the last session's unfreeze also clears
+            # objects something else froze earlier in the process.
             left[key] = f"{before[key]} -> {value}"
     return left
 

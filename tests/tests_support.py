@@ -50,8 +50,10 @@ def child_processes() -> list[str]:
     pid = os.getpid()
     if sys.platform == "win32":
         return sorted(_windows_children(pid))
+    # -ww: without a terminal, ps cuts lines at 80 columns, which hid
+    # "resource_tracker" behind a long interpreter path on CI.
     out = subprocess.run(
-        ["ps", "-A", "-o", "pid=,ppid=,command="], capture_output=True, text=True
+        ["ps", "-A", "-ww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
     ).stdout
     found = []
     for line in out.splitlines():
