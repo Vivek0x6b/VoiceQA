@@ -215,6 +215,36 @@ recording     runs\20261108-185319-calibrate
 
 This runs against a local echo agent started in-process and writes the same recording files plus calibration.json (median, p95, min, max, and how many pulses were sent and matched). It is VoiceQA's own sending, local UDP and receiving time, not anything a real agent does: subtract it from latencies measured against one.
 
+### Scripted test agent
+
+`voiceqa agent --script replies.yaml` stands in for a real voice agent. It plays a greeting when it answers, then one reply each time the caller stops talking, in order:
+
+```yaml
+greeting: {say: "Hello, how can I help?"}
+replies:
+  - {say: "Sure.", delay_ms: 400}
+  - {say: "Bye now."}
+then: hangup
+```
+
+Each line is either `wav` (a WAV file, relative to the YAML file, any rate, for example `{wav: replies/name.wav}`) or `say` (text, spoken with `--tts`, `--voice` and `--prompts` as for `voiceqa say`). `delay_ms` (default 0) counts from the end of the caller's last word, or from the answer for the greeting. The caller's turn ends after 700 ms of silence (`--end-silence-ms`), so a delay shorter than that is the same as no delay: in the run below the caller stopped at 3.0 s and reply 1 went out at 3.70 s. After the last reply, `then: hangup` (the default) ends the call and `then: silence` keeps it open. Every call starts from the top.
+
+```
+voiceqa agent --script replies.yaml --tts fake
+```
+
+```
+tts           fake, 3 say line(s) ready
+agent listening on 127.0.0.1:5060 (script replies.yaml), Ctrl+C to stop
+2026-11-11 17:16:22,010 answered call fa1903962645b281cb3d774c from 127.0.0.1:52334 (PCMU)
+2026-11-11 17:16:22,042 call fa1903962645b281cb3d774c: greeting (say) at 0.04 s
+2026-11-11 17:16:25,696 call fa1903962645b281cb3d774c: reply 1 (say) at 3.70 s
+2026-11-11 17:16:28,707 call fa1903962645b281cb3d774c: reply 2 (say) at 6.72 s
+2026-11-11 17:16:29,134 call fa1903962645b281cb3d774c ended
+```
+
+Every say line is made before the agent starts listening, so a bad script or a TTS failure stops it at once (exit 1) with the line it was about. The turn detection uses the energy VAD by default, so it needs no extra; `--vad silero` needs the `[stt]` extra.
+
 ## Responsible use
 
 Only test voice agents you own or have permission to test. See [SECURITY.md](SECURITY.md).

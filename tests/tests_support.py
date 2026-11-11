@@ -1,10 +1,19 @@
-"""Helpers shared by tests: the pytest process's child processes and a
-one-line description of the machine's state for failure messages."""
+"""Helpers shared by tests: the pytest process's child processes, a check
+that a test left nothing running, and a one-line description of the
+machine's state for failure messages."""
 
+import contextlib
+import gc
+import multiprocessing
 import os
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Iterator
+
+# Time for children and threads that are already stopping to be reaped.
+LEAK_GRACE_SECONDS = 5.0
 
 
 def _windows_children(pid: int) -> list[str]:
@@ -64,6 +73,52 @@ def child_processes() -> list[str]:
             continue
         found.append(f"{parts[0]} {parts[2][:200]}")
     return sorted(found)
+
+
+def _threads() -> set[str]:
+    return {
+        f"{t.name} (daemon={t.daemon})"
+        for t in threading.enumerate()
+        if t is not threading.main_thread() and (not t.daemon or t.name.startswith("voiceqa"))
+    }
+
+
+def _snapshot() -> dict:
+    return {
+        "child processes": set(child_processes()),
+        "multiprocessing children": {p.name for p in multiprocessing.active_children()},
+        "threads": _threads(),
+        "frozen objects": gc.get_freeze_count(),
+    }
+
+
+def _left(before: dict, after: dict) -> dict:
+    left = {}
+    for key, value in after.items():
+        if isinstance(value, set):
+            extra = value - before[key]
+            if extra:
+                left[key] = sorted(extra)
+        elif value > before[key]:
+            # Only a rise is ours: the last session's unfreeze also clears
+            # objects something else froze earlier in the process.
+            left[key] = f"{before[key]} -> {value}"
+    return left
+
+
+@contextlib.contextmanager
+def nothing_left_running(grace: float = LEAK_GRACE_SECONDS) -> Iterator[None]:
+    """Fails if the body leaves a child process, a multiprocessing child, a
+    non-daemon or voiceqa thread, or more frozen GC objects behind."""
+    before = _snapshot()
+    yield
+    deadline = time.monotonic() + grace
+    while True:
+        left = _left(before, _snapshot())
+        if not left or time.monotonic() > deadline:
+            break
+        time.sleep(0.1)
+    assert not left, f"the test left this behind: {left}"
 
 
 def say_probe(text: str) -> str:

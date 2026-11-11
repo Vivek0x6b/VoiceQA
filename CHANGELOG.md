@@ -68,6 +68,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `StreamResampler`: our resampler for audio that arrives in frames, with the same output as one pass over the whole clip.
 - Live turns during a call (`voiceqa.engine.session.CallSession`): the agent's audio goes through the VAD in its own thread while the call runs, each finished agent turn is transcribed in the STT worker without stopping the call, `say()` returns the slot times of the first and last frame sent, and `next_agent_turn()` returns agent turns in order with their transcript. events.json gets `agent_speech_start`, `agent_turn_end`, `caller_say_start`, `caller_say_end` and `overlap` events, and transcript.json gets per-turn agent segments plus the caller's said text, tagged with turn ids.
 - `TurnDetector.finish()` and `ThreadedTurnDetector.close(finish=True)`: a turn still open when the stream ends gets its turn_end at its last speech frame. `vad_notice()` gives the one-line notice for when `auto` falls back to the energy VAD, so a CLI can print it.
+- Scripted test agent: `voiceqa agent --script replies.yaml` plays an optional greeting on answer, then one reply each time the caller's turn ends, in order, and after the last one hangs up (`then: hangup`, the default) or stays on the line (`then: silence`). Replies are WAV files or text spoken with `--tts`/`--voice`/`--prompts`, all made before the agent listens. A reply's first frame goes out in the first slot at or after the end of the caller's last word plus its `delay_ms`. Every call starts the script from the top, and each line played is logged. `--vad` (default energy, so no extra is needed) and `--end-silence-ms` (default 700) set the turn detection. A bad script or a TTS failure exits 1 before listening, naming the line.
 
 ### Changed
 
@@ -83,6 +84,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - docs/ARCHITECTURE.md marks M1 as done and names M2 (local STT and TTS) as the current milestone.
 - docs/ARCHITECTURE.md lists the M2 issues and the decisions behind them: faster-whisper as an optional extra, WAV prompts plus OS speech engines for TTS, and neural TTS engines only as separately installed plugins for licence reasons.
 - `run_call` resolves the SIP server once and hands the address to `place_call` (new `server` argument and public `resolve_server`), instead of looking it up a second time. An unresolvable server now reads "cannot resolve SIP server HOST: ..." in the call summary.
+- The check that a test leaves nothing running (child processes, threads, frozen GC objects) moved from tests/engine/conftest.py to tests/tests_support.py, so the scripted agent tests use it too.
 - `create_tts("sapi")`, `create_tts("say")` and `create_tts("plugin:<name>")` now build engines instead of raising `NotImplementedError`. An OS engine on the wrong OS raises `TtsError`. `create_stt("plugin:<name>")` still raises `NotImplementedError`, since there are no STT plugins.
 
 ### Fixed

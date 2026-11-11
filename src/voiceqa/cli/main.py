@@ -40,9 +40,10 @@ from voiceqa.speech.models import Transcript
 from voiceqa.speech.registry import create_tts, default_tts_name
 from voiceqa.speech.tts_cache import CachedTts
 from voiceqa.speech.tts_process import TtsError
-from voiceqa.speech.vad import auto_vad_name
+from voiceqa.speech.vad import SileroModelError, auto_vad_name
 from voiceqa.speech.worker import SttWorker, SttWorkerError
 from voiceqa.telephony.local.agent import AgentConfig, LocalAgent, load_prompt
+from voiceqa.telephony.local.script import Script, ScriptError, read_script
 from voiceqa.telephony.media import SAMPLE_RATE, PayloadType
 
 app = typer.Typer(help="Local-first QA lab for AI voice agents.", no_args_is_help=True)
@@ -450,6 +451,15 @@ def say(
     _line("saved", str(out))
 
 
+class VadName(StrEnum):
+    energy = "energy"
+    silero = "silero"
+    auto = "auto"
+
+
+DEFAULT_END_SILENCE_MS = 700.0
+
+
 @app.command()
 def agent(
     host: Annotated[str, typer.Option(help="Address to listen on for SIP and RTP.")] = "127.0.0.1",
@@ -463,25 +473,98 @@ def agent(
     answer_delay: Annotated[
         float, typer.Option(min=0.0, help="Ring this many seconds before answering.")
     ] = 0.0,
+    script: Annotated[
+        Path | None,
+        typer.Option(
+            "--script",
+            help="YAML file of replies: a greeting, then one reply each time the caller "
+            "stops talking.",
+        ),
+    ] = None,
+    tts: TtsOption = None,
+    voice: VoiceOption = None,
+    prompts: PromptsOption = None,
+    vad: Annotated[
+        VadName | None,
+        typer.Option(help="VAD that finds the end of the caller's turns. Default: energy."),
+    ] = None,
+    end_silence_ms: Annotated[
+        float | None,
+        typer.Option(
+            "--end-silence-ms",
+            help="Silence that ends the caller's turn, in ms. Default: 700.",
+            callback=lambda value: value if value is None else _positive(value),
+        ),
+    ] = None,
 ) -> None:
-    """Run a local test agent that answers calls and echoes or plays a WAV."""
+    """Run a local test agent that answers calls and echoes, plays a WAV, or
+    follows a script of replies.
+
+    With --script, say lines are synthesized before the agent listens
+    (--tts, --voice and --prompts as for voiceqa say), and a reply's delay_ms
+    counts from the end of the caller's last word. --vad and --end-silence-ms
+    only apply with --script. A bad script or a TTS failure exits 1 before
+    listening.
+    """
+    if script is None:
+        given = {
+            "--tts": tts,
+            "--voice": voice,
+            "--prompts": prompts,
+            "--vad": vad,
+            "--end-silence-ms": end_silence_ms,
+        }
+        named = [name for name, value in given.items() if value is not None]
+        if named:
+            raise _bad_option(f"{', '.join(named)} only apply together with --script")
+    elif play is not None:
+        typer.echo("error: use either --script or --play, not both", err=True)
+        raise typer.Exit(1)
+    loaded = _load_agent_script(script, tts, voice, prompts) if script is not None else None
     config = AgentConfig(
-        host=host, port=port, play=play, hangup_after=hangup_after, answer_delay=answer_delay
+        host=host,
+        port=port,
+        play=play,
+        hangup_after=hangup_after,
+        answer_delay=answer_delay,
+        script=loaded,
+        vad=(vad or VadName.energy).value,
+        end_silence_ms=end_silence_ms or DEFAULT_END_SILENCE_MS,
     )
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     try:
         asyncio.run(_serve_agent(config))
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, SttExtraMissingError, SileroModelError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from None
     except KeyboardInterrupt:
         pass
 
 
+def _load_agent_script(
+    path: Path, tts: str | None, voice: str | None, prompts: Path | None
+) -> Script:
+    try:
+        script = read_script(path)
+        if script.needs_tts:
+            hint = "Pass --prompts INDEX.yaml with a WAV for each say line, or use wav lines."
+            engine = _tts_engine(tts, prompts, hint)
+            script = script.with_speech(lambda text: engine.synthesize(text, voice))
+            says = sum(line.kind == "say" for line in script.lines)
+            _line("tts", f"{engine.name}, {says} say line(s) ready")
+    except ScriptError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    return script
+
+
 async def _serve_agent(config: AgentConfig) -> None:
     local = await LocalAgent.start(config)
     host, port = local.local_addr
-    mode = f"playing {config.play}" if config.play else "echo"
+    if config.script is not None:
+        mode = f"script {config.script.path}"
+    else:
+        mode = f"playing {config.play}" if config.play else "echo"
     typer.echo(f"agent listening on {host}:{port} ({mode}), Ctrl+C to stop")
     try:
         await asyncio.Event().wait()
