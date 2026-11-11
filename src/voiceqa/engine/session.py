@@ -31,6 +31,7 @@ transcript.json use seconds since the recorder was created, as everywhere.
 
 import asyncio
 import contextlib
+import gc
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -78,6 +79,30 @@ CALLER_SAY_END = "caller_say_end"
 OVERLAP = "overlap"
 VAD_ERROR = "vad_error"
 VAD_STOPPED = "vad_stopped"
+
+
+_live_sessions = 0
+
+
+def _freeze_heap() -> None:
+    """Collect once, then leave every object that exists now out of later
+    GC passes, until the last live session closes. Setup (importing
+    faster-whisper and onnxruntime for Silero) leaves tens of thousands of
+    objects, and a full GC pass over them in the middle of a call holds the
+    GIL long enough to make the RTP sender late. The first session of
+    several pays the collect, before it dials."""
+    global _live_sessions
+    if _live_sessions == 0:
+        gc.collect()
+        gc.freeze()
+    _live_sessions += 1
+
+
+def _unfreeze_heap() -> None:
+    global _live_sessions
+    _live_sessions -= 1
+    if _live_sessions == 0:
+        gc.unfreeze()
 
 
 class CallEnded(Exception):
@@ -198,6 +223,7 @@ class CallSession:
         self._media_stop: asyncio.Task | None = None
         self._media_done = False
         self._started = False
+        self._frozen = False
         self._closed = False
         self._t_answered: float | None = None
         self._duration: float | None = None
@@ -241,6 +267,8 @@ class CallSession:
         self._started = True
         self._loop = asyncio.get_running_loop()
         self._rec = CallRecorder(self.record_dir)
+        _freeze_heap()
+        self._frozen = True
         try:
             await self._dial()
         except BaseException:
@@ -413,7 +441,12 @@ class CallSession:
         finally:
             if self._watcher is not None:
                 self._watcher.cancel()
-            self._close_recording()
+            try:
+                self._close_recording()
+            finally:
+                if self._frozen:
+                    self._frozen = False
+                    _unfreeze_heap()
         if self.answered and self._stt is not None:
             await self._write_transcript()
 

@@ -1,6 +1,8 @@
 import asyncio
+import gc
 import json
 import threading
+import weakref
 
 import numpy as np
 import pytest
@@ -8,6 +10,7 @@ from test_call import start_rejecting_uas
 
 from voiceqa.audio.dsp import generate_tone
 from voiceqa.audio.wav import read_wav, write_wav
+from voiceqa.engine import session as session_module
 from voiceqa.engine.session import (
     AGENT_SPEECH_START,
     AGENT_TURN_END,
@@ -469,6 +472,45 @@ def test_next_agent_turn_times_out_when_the_agent_says_nothing(tmp_path):
             await agent.close()
 
     asyncio.run(main())
+
+
+class Cycle:
+    pass
+
+
+def test_heap_is_collected_and_frozen_before_dialing_and_released_after(tmp_path, monkeypatch):
+    assert gc.get_freeze_count() == 0
+    seen = {}
+    real_place_call = session_module.place_call
+
+    async def place_call(*args, **kwargs):
+        seen["frozen at dial"] = gc.get_freeze_count()
+        seen["cycle alive at dial"] = ref() is not None
+        return await real_place_call(*args, **kwargs)
+
+    monkeypatch.setattr(session_module, "place_call", place_call)
+    # Garbage left by setup (a reference cycle) must be collected, not frozen.
+    cycle = Cycle()
+    cycle.me = cycle
+    ref = weakref.ref(cycle)
+    del cycle
+
+    async def main():
+        agent = await start_agent(tmp_path, noise(2.0))
+        try:
+            async with session_for(agent, tmp_path / "run") as session:
+                seen["frozen in call"] = gc.get_freeze_count()
+                with pytest.raises(TimeoutError):
+                    await session.next_agent_turn(timeout=0.3)
+        finally:
+            await agent.close()
+
+    asyncio.run(main())
+
+    assert seen["frozen at dial"] > 0
+    assert seen["frozen in call"] > 0
+    assert seen["cycle alive at dial"] is False
+    assert gc.get_freeze_count() == 0
 
 
 def test_auto_vad_fallback_notice_is_exposed_before_dialing(monkeypatch):

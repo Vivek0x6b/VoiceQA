@@ -10,9 +10,11 @@ The sender's contract: a frame more than MAX_LATE_FRAMES late makes it skip
 slots. Each such catch-up is a stall.
 """
 
+import contextlib
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -25,12 +27,25 @@ pytestmark = [pytest.mark.model, pytest.mark.usefixtures("silero_extra")]
 CHILD = Path(__file__).with_name("jitter_child.py")
 CALLS = 3
 CALL_SECONDS = 4.0
+READY_TIMEOUT = 60.0
+# The smallest stall skips MAX_LATE_FRAMES + 1 = 6 slots (a frame over
+# 100 ms late); 8 slots is 160 ms.
+EXTRA_STALL_SLOTS = 8
 
 
 def stalls(dues):
     """(position in seconds from the first slot, slots skipped) per catch-up."""
     steps = np.round(np.diff(dues) / FRAME_SECONDS).astype(int)
     return [(round(dues[i] - dues[0], 2), int(s - 1)) for i, s in enumerate(steps) if s > 1]
+
+
+def read_line(proc, timeout):
+    """proc's next stdout line, or None if none came within timeout."""
+    got = []
+    reader = threading.Thread(target=lambda: got.append(proc.stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(timeout)
+    return got[0] if got else None
 
 
 def run_side_by_side(tmp_path):
@@ -45,7 +60,9 @@ def run_side_by_side(tmp_path):
     }
     try:
         for mode, proc in procs.items():
-            assert proc.stdout.readline().strip() == "ready", f"{mode} child did not start"
+            line = read_line(proc, READY_TIMEOUT)
+            assert line is not None, f"{mode} child not ready within {READY_TIMEOUT} s"
+            assert line.strip() == "ready", f"{mode} child did not start: {line!r}"
         for proc in procs.values():
             proc.stdin.write("go\n")
             proc.stdin.flush()
@@ -59,6 +76,11 @@ def run_side_by_side(tmp_path):
         for proc in procs.values():
             if proc.poll() is None:
                 proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+            for pipe in (proc.stdin, proc.stdout):
+                with contextlib.suppress(OSError):
+                    pipe.close()
 
 
 def test_silero_vad_does_not_make_the_rtp_sender_late(tmp_path):
@@ -80,13 +102,14 @@ def test_silero_vad_does_not_make_the_rtp_sender_late(tmp_path):
         }
     print(stats)
 
-    silero_stalls = sum(len(s) for s in stats["silero"]["stalls"])
-    none_stalls = sum(len(s) for s in stats["none"]["stalls"])
-    # A stall Silero caused would come with every call (a start-up cost) or
-    # recur during calls, so it shows more than once over CALLS calls. One
-    # extra allows for the scheduler starving one process and not the other
-    # once.
-    assert silero_stalls <= none_stalls + 1, stats
+    count = {m: sum(len(s) for s in stats[m]["stalls"]) for m in stats}
+    skipped = {m: sum(n for s in stats[m]["stalls"] for _, n in s) for m in stats}
+    # Allowed: one more stall on the Silero side than on the other, as long
+    # as it is a short one (the scheduler starving one process and not the
+    # other once). A one-off Silero cost of a few hundred ms (once per
+    # process, so in a real run's only call) skips far more slots than that.
+    assert count["silero"] <= count["none"] + 1, stats
+    assert skipped["silero"] <= skipped["none"] + EXTRA_STALL_SLOTS, stats
     # Same lateness, within half a frame at the tail. Timer resolution on
     # Windows before 3.13 is 15.6 ms, which both share.
     half_frame_ms = FRAME_SECONDS * 1000 / 2
