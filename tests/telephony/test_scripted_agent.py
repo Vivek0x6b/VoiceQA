@@ -253,12 +253,15 @@ async def scripted_call(agent, directory, send, listen, until_ended=False):
     return rec.t0, ended
 
 
-def loud_runs(audio, threshold=2000):
-    """(first frame, last frame) of each run of loud 20 ms frames."""
+def loud_runs(audio, threshold=2000, max_gap=15):
+    """(first frame, last frame) of each run of loud 20 ms frames. A hole
+    of up to max_gap frames (300 ms) stays inside a run: a stalled sender
+    skips slots, which splits a tone on the wire. Tones in these tests are
+    at least 1 s apart."""
     loud = np.flatnonzero(frame_rms(audio) > threshold)
     runs = []
     for i in loud:
-        if runs and i - runs[-1][1] <= 2:
+        if runs and i - runs[-1][1] <= max_gap:
             runs[-1][1] = i
         else:
             runs.append([i, i])
@@ -326,14 +329,21 @@ def test_greeting_then_replies_in_order_each_after_its_delay(tmp_path, caplog):
     for p in replies:
         assert 0 <= p.at - (p.after + DELAY_MS / 1000) < FRAME_S + 1e-6
 
+    # The checks below cross from the agent's clock to the caller's
+    # recording. Each receive timeline is anchored on a first packet, which
+    # a loaded machine can deliver early or late by tens of ms, so they
+    # allow `wire` seconds either way (0.15 s for the gap, which crosses
+    # twice). The wrong answers are much further off: no delay is 0.6 s
+    # early, timing from the decision 0.3 s late, timing from the tone's
+    # start 0.5 s early.
+    wire = 0.1
     caller_wav, _ = read_wav(tmp_path / "run" / "caller.wav")
     agent_wav, _ = read_wav(tmp_path / "run" / "agent.wav")
-    # The turn end the agent timed from is the end of the caller's tone,
-    # not its start or the end-of-turn decision 300 ms later.
+    # The turn end the agent timed from is the end of the caller's tone.
     bursts = [(a * FRAME_S, (b + 1) * FRAME_S) for a, b in loud_runs(caller_wav)]
     assert len(bursts) == 2
     for p, (_, end) in zip(replies, bursts, strict=True):
-        assert p.after - t0 == pytest.approx(end, abs=FRAME_S + 0.005)
+        assert p.after - t0 == pytest.approx(end, abs=wire)
 
     # On the wire: three tones in agent.wav, in script order, each where
     # the agent said it put it.
@@ -342,14 +352,12 @@ def test_greeting_then_replies_in_order_each_after_its_delay(tmp_path, caplog):
     for (a, b), freq, p in zip(runs, (500, 700, 900), played, strict=True):
         piece = agent_wav[a * 160 : (b + 1) * 160]
         assert abs(dominant_hz(piece) - freq) < 10
-        assert first_loud_time(piece) + a * FRAME_S == pytest.approx(p.at - t0, abs=2 * FRAME_S)
+        assert first_loud_time(piece) + a * FRAME_S == pytest.approx(p.at - t0, abs=wire)
     # Caller's tone end to the reply's first sound, as the caller heard it.
-    # Only lateness adds up here: the reply waits for the next slot (up to
-    # a frame), and each receive timeline is anchored on a first packet that
-    # can arrive up to a timer tick late. Measured 0.60 to 0.64 s.
+    # Measured 0.60 to 0.64 s idle, as low as 0.58 s under load.
     for (a, _), (_, end) in zip(runs[1:], bursts, strict=True):
         gap = first_loud_time(agent_wav[a * 160 :]) + a * FRAME_S - end
-        assert DELAY_MS / 1000 - 0.005 <= gap <= DELAY_MS / 1000 + 3 * FRAME_S
+        assert abs(gap - DELAY_MS / 1000) <= 0.15
 
     lines = [r.getMessage() for r in caplog.records if r.name == "voiceqa.telephony.local.agent"]
     played_lines = [m for m in lines if " at " in m and ("reply" in m or "greeting" in m)]
@@ -484,6 +492,58 @@ def test_a_call_is_closed_only_once_its_vad_thread_has_stopped(tmp_path, monkeyp
             await agent.close()
 
     assert asyncio.run(main()) == [True]
+
+
+def test_hangup_after_stops_the_vad_thread_before_the_bye(tmp_path, monkeypatch):
+    # With --hangup-after the agent hangs up itself, so nothing else cancels
+    # the script. Its VAD thread must be stopped (slowly, 300 ms here)
+    # before the BYE goes out, or a late turn_end would send on closed media.
+    real_close = ThreadedTurnDetector.close
+    stopped = []
+
+    def slow_close(self, *args, **kwargs):
+        time.sleep(0.3)
+        real_close(self, *args, **kwargs)
+        stopped.append(True)
+
+    monkeypatch.setattr(ThreadedTurnDetector, "close", slow_close)
+    script = reply_script(tmp_path, then="silence", greeting_delay=0)
+
+    async def main():
+        agent = await start_scripted(script, hangup_after=0.5)
+        rtp = await RtpSession.open(bind_host="127.0.0.1")
+        try:
+            call = await place_call(caller_config(agent), "agent", rtp.local)
+            await rtp.start(call.remote_media)
+            async with asyncio.timeout(5):
+                await call.wait_ended()
+            return list(stopped)
+        finally:
+            await rtp.close()
+            await agent.close()
+
+    assert asyncio.run(main()) == [True]
+
+
+def test_frames_the_vad_dropped_are_logged_as_a_warning(tmp_path, monkeypatch, caplog):
+    # A VAD that falls behind loses frames, and turns can go missing with
+    # them; the log says so once the call ends.
+    monkeypatch.setattr(ThreadedTurnDetector, "dropped_frames", property(lambda self: 7))
+    script = reply_script(tmp_path, then="silence", greeting_delay=0)
+
+    async def main():
+        agent = await start_scripted(script, hangup_after=0.3)
+        try:
+            await scripted_call(agent, tmp_path / "run", silence(1.0), listen=2.0)
+        finally:
+            await agent.close()
+
+    with caplog.at_level(logging.WARNING, logger="voiceqa.telephony.local.agent"):
+        asyncio.run(main())
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "dropped 7 frames" in warnings[0]
 
 
 def test_hangup_after_still_ends_a_scripted_call(tmp_path):

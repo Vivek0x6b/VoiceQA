@@ -53,6 +53,8 @@ def _start_agent() -> tuple[subprocess.Popen, int]:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=_subprocess_env(),
     )
     lines: queue.Queue[str | None] = queue.Queue()
@@ -98,6 +100,8 @@ def test_python_dash_m_voiceqa_help_works():
         [sys.executable, "-m", "voiceqa", "--help"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=15,
     )
     assert result.returncode == 0
@@ -122,6 +126,8 @@ def test_call_against_the_agent_subprocess_end_to_end(tmp_path):
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=_subprocess_env(),
             timeout=CALL_TIMEOUT,
         )
@@ -218,6 +224,8 @@ def test_spoken_call_to_the_echo_agent_is_transcribed_on_both_sides(test_model, 
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=TRANSCRIBE_CALL_TIMEOUT,
         )

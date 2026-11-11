@@ -128,7 +128,11 @@ def _queue_line(call: ServerCall, sink: _ScriptSink, line: Line, target: float) 
     """Queue line's audio so its first frame takes the first slot at or
     after target, and return that slot. Nothing else may be queued: then
     the next frame queued takes the slot after the last one sent. The
-    sender runs on this thread, so no slot can pass while this runs."""
+    sender runs on this thread, so no slot can pass while this runs.
+
+    The slot returned (Played.at and the INFO line) assumes the sender skips
+    no slots. After a stall of more than MAX_LATE_FRAMES the sender jumps
+    ahead, the line goes out later than this, and the logged time reads early."""
     assert sink.last_sent is not None and line.audio is not None
     next_slot = sink.last_sent + FRAME_SECONDS
     pad = max(0, math.ceil((target - next_slot) / FRAME_SECONDS - 1e-6))
@@ -221,6 +225,12 @@ class LocalAgent:
                 log.warning("call %s: %s", call.call_id, exc)
             except Exception:
                 pass  # a VAD error, already logged by on_error
+            if detector.dropped_frames:
+                log.warning(
+                    "call %s: the VAD fell behind and dropped %d frames, turns may be missed",
+                    call.call_id,
+                    detector.dropped_frames,
+                )
 
     async def _play(
         self, call: ServerCall, sink: _ScriptSink, line: Line, after: float, answered: float
@@ -247,6 +257,11 @@ class LocalAgent:
                 await call.wait_ended()
             else:
                 await asyncio.sleep(self.config.hangup_after)
+                # We hang up ourselves, so nothing else stops the work: stop
+                # it (and a script's VAD thread) before media closes.
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
                 await call.hangup()
         finally:
             work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
