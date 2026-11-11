@@ -62,7 +62,7 @@ def child_processes() -> list[str]:
             continue
         if "resource_tracker" in parts[2] or parts[2].startswith("ps -A"):
             continue
-        found.append(f"{parts[0]} {parts[2][:120]}")
+        found.append(f"{parts[0]} {parts[2][:200]}")
     return sorted(found)
 
 
