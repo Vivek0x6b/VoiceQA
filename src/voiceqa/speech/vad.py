@@ -19,6 +19,7 @@ import logging
 import math
 import queue
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -294,20 +295,32 @@ class TurnDetector:
             return [TurnEvent(TURN_END, self._last_speech_end)]
         return []
 
+    def finish(self) -> list[TurnEvent]:
+        """End of stream: a turn still open (speaking, or inside the
+        end-silence wait) ends at the end of its last speech frame."""
+        self._run_start = None
+        if not self._in_turn:
+            return []
+        self._in_turn = False
+        return [TurnEvent(TURN_END, self._last_speech_end)]
+
 
 _STOP = object()
+_STOP_FINISH = object()
 
 
 class ThreadedTurnDetector:
     """Runs a TurnDetector in its own thread, fed through a bounded queue.
 
     `feed()` never blocks: it copies the frame into the queue, or counts it
-    in `dropped_frames` and returns False when the queue is full. Call it
-    from one thread only (in a call, the media sink callback). `on_event`
-    runs in the detector's thread; to hand events to asyncio, pass
-    something like `lambda e: loop.call_soon_threadsafe(events.put_nowait, e)`.
-    If the detector or `on_event` raises, later frames are discarded and
-    `close()` raises that error.
+    in `dropped_frames` and returns False when the queue is full. Every
+    frame `feed()` accepted is either processed or counted as dropped.
+    `on_event` runs in the detector's thread; to hand events to asyncio,
+    pass something like
+    `lambda e: loop.call_soon_threadsafe(events.put_nowait, e)`.
+    If the detector or `on_event` raises, `on_error` (if given) gets the
+    error at once in the detector's thread, `error` holds it, later frames
+    are counted as dropped and `close()` raises it.
     """
 
     def __init__(
@@ -315,12 +328,18 @@ class ThreadedTurnDetector:
         detector: TurnDetector,
         on_event: Callable[[TurnEvent], object],
         max_frames: int = 50,
+        on_error: Callable[[BaseException], object] | None = None,
     ) -> None:
         self.detector = detector
         self._on_event = on_event
+        self._on_error = on_error
         self._queue: queue.Queue = queue.Queue(maxsize=max_frames)
         self._thread = threading.Thread(target=self._run, name="voiceqa-vad", daemon=True)
+        # Held only around the closed check and a put_nowait, never for a
+        # blocking call, so feed() still never waits for long.
+        self._lock = threading.Lock()
         self._closed = False
+        self._stop_sent = False
         self._dropped = 0
         self._error: BaseException | None = None
 
@@ -328,29 +347,46 @@ class ThreadedTurnDetector:
     def dropped_frames(self) -> int:
         return self._dropped
 
+    @property
+    def error(self) -> BaseException | None:
+        return self._error
+
     def start(self) -> None:
         self._thread.start()
 
     def feed(self, at: float, frame: np.ndarray) -> bool:
-        if self._closed:
-            return False
-        try:
-            self._queue.put_nowait((at, np.array(frame, dtype=np.int16, copy=True)))
-        except queue.Full:
-            self._dropped += 1
-            return False
+        item = (at, np.array(frame, dtype=np.int16, copy=True))
+        with self._lock:
+            if self._closed:
+                return False
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                self._dropped += 1
+                return False
         return True
 
-    def close(self, timeout: float = 5.0) -> None:
-        """Processes the frames already queued, then stops the thread."""
-        if not self._closed:
+    def close(self, timeout: float = 5.0, finish: bool = False) -> None:
+        """Processes the frames already queued, then stops the thread.
+
+        With `finish`, a turn still open after the last frame gets its
+        turn_end (see TurnDetector.finish) before the thread stops. Raises
+        TimeoutError if the thread has not stopped within `timeout` seconds.
+        """
+        deadline = time.monotonic() + timeout
+        with self._lock:
             self._closed = True
-            if self._thread.is_alive():
-                self._queue.put(_STOP, timeout=timeout)
+        if not self._stop_sent and self._thread.is_alive():
+            try:
+                self._queue.put(_STOP_FINISH if finish else _STOP, timeout=timeout)
+            except queue.Full:
+                raise TimeoutError(f"the VAD thread did not stop within {timeout} s") from None
+            self._stop_sent = True
         if self._thread.ident is not None:
-            self._thread.join(timeout)
+            self._thread.join(max(0.0, deadline - time.monotonic()))
             if self._thread.is_alive():
                 raise TimeoutError(f"the VAD thread did not stop within {timeout} s")
+        self._drop_leftovers()
         if self._error is not None:
             raise self._error
 
@@ -361,18 +397,41 @@ class ThreadedTurnDetector:
     def __exit__(self, *exc_info) -> None:
         self.close()
 
+    def _drop_leftovers(self) -> None:
+        # Frames fed before a start() that never came.
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            if isinstance(item, tuple):
+                with self._lock:
+                    self._dropped += 1
+
     def _run(self) -> None:
         while True:
             item = self._queue.get()
-            if item is _STOP:
+            if item is _STOP or item is _STOP_FINISH:
+                if item is _STOP_FINISH and self._error is None:
+                    self._handle(self.detector.finish)
                 return
             if self._error is not None:
+                with self._lock:
+                    self._dropped += 1
                 continue
-            try:
-                for event in self.detector.feed(*item):
-                    self._on_event(event)
-            except Exception as exc:
-                self._error = exc
+            self._handle(self.detector.feed, *item)
+
+    def _handle(self, step: Callable[..., list[TurnEvent]], *args: object) -> None:
+        try:
+            for event in step(*args):
+                self._on_event(event)
+        except Exception as exc:
+            self._error = exc
+            if self._on_error is not None:
+                try:
+                    self._on_error(exc)
+                except Exception:
+                    logger.exception("VAD on_error callback failed")
 
 
 _VAD_NAMES = ("auto", "energy", "silero")
@@ -381,6 +440,14 @@ _VAD_NAMES = ("auto", "energy", "silero")
 def auto_vad_name() -> str:
     """The VAD `create_vad("auto")` builds: silero with the [stt] extra, else energy."""
     return "silero" if model_cache.stt_extra_installed() else "energy"
+
+
+def vad_notice(name: str) -> str | None:
+    """The one-line notice a CLI should show for `name`: ENERGY_FALLBACK_NOTICE
+    when "auto" falls back to energy, else None."""
+    if name == "auto" and auto_vad_name() == "energy":
+        return ENERGY_FALLBACK_NOTICE
+    return None
 
 
 def create_vad(name: str, **kwargs: object) -> Vad:

@@ -1,6 +1,8 @@
 import logging
+import queue
 import sys
 import threading
+import time
 import types
 
 import numpy as np
@@ -311,6 +313,143 @@ def test_threaded_detector_ignores_frames_after_close():
     td.close()
     assert td.feed(T0, np.zeros(FRAME, dtype=np.int16)) is False
     assert td.dropped_frames == 0
+
+
+def test_threaded_detector_close_times_out_once_when_stuck_with_a_full_queue():
+    blocking = BlockingVad()
+    td = ThreadedTurnDetector(TurnDetector(blocking), lambda e: None, max_frames=2)
+    td.start()
+    frame = np.zeros(FRAME, dtype=np.int16)
+    try:
+        assert td.feed(T0, frame)
+        assert blocking.entered.wait(10)
+        assert td.feed(T0, frame) and td.feed(T0, frame)
+        timeout = 1.5
+        began = time.perf_counter()
+        with pytest.raises(TimeoutError):
+            td.close(timeout)
+        # The old close waited for queue space and then for the join, each
+        # with the full timeout.
+        assert time.perf_counter() - began < 2 * timeout - 0.1
+    finally:
+        blocking.release.set()
+        td.close()
+
+
+def test_threaded_detector_counts_frames_fed_before_a_start_that_never_came():
+    td = ThreadedTurnDetector(TurnDetector(EnergyVad()), lambda e: None)
+    for _ in range(3):
+        assert td.feed(T0, np.zeros(FRAME, dtype=np.int16))
+    td.close()
+    assert td.dropped_frames == 3
+
+
+class _PausingQueue(queue.Queue):
+    """Holds the first frame put until `go` is set, to open the window
+    between feed's closed check and its put."""
+
+    def __init__(self, maxsize):
+        super().__init__(maxsize)
+        self.entered = threading.Event()
+        self.go = threading.Event()
+
+    def put_nowait(self, item):
+        if not self.entered.is_set() and isinstance(item, tuple):
+            self.entered.set()
+            assert self.go.wait(10)
+        super().put_nowait(item)
+
+
+def test_threaded_detector_feed_racing_close_loses_no_frame():
+    seen = []
+
+    class Counting(ScriptedVad):
+        def process(self, frame):
+            seen.append(1)
+            return 0.0
+
+    td = ThreadedTurnDetector(TurnDetector(Counting([])), lambda e: None)
+    td._queue = _PausingQueue(50)
+    td.start()
+    results = []
+    feeder = threading.Thread(
+        target=lambda: results.append(td.feed(T0, np.zeros(FRAME, dtype=np.int16)))
+    )
+    feeder.start()
+    assert td._queue.entered.wait(10)
+    closer = threading.Thread(target=td.close)
+    closer.start()
+    # Gives close every chance to finish first if feed does not hold it off.
+    closer.join(0.3)
+    td._queue.go.set()
+    feeder.join(10)
+    closer.join(10)
+    assert not closer.is_alive()
+    assert results == [True]
+    assert len(seen) + td.dropped_frames == 1
+
+
+def test_threaded_detector_reports_an_error_before_close():
+    class Broken(ScriptedVad):
+        def process(self, frame):
+            raise RuntimeError("model broke")
+
+    errors = []
+    reported = threading.Event()
+
+    def on_error(exc):
+        errors.append(exc)
+        reported.set()
+
+    td = ThreadedTurnDetector(TurnDetector(Broken([])), lambda e: None, on_error=on_error)
+    td.start()
+    td.feed(T0, np.zeros(FRAME, dtype=np.int16))
+    assert reported.wait(10)
+    assert str(errors[0]) == "model broke"
+    assert td.error is errors[0]
+    # Frames after an error are counted, not silently thrown away.
+    td.feed(T0, np.zeros(FRAME, dtype=np.int16))
+    with pytest.raises(RuntimeError, match="model broke"):
+        td.close()
+    assert td.dropped_frames == 1
+
+
+def test_threaded_detector_close_with_finish_ends_the_open_turn():
+    frames = tone_frames([("gap", 400), ("tone", 600), ("gap", 200)])
+    got = []
+    with ThreadedTurnDetector(TurnDetector(EnergyVad()), got.append, max_frames=1000) as td:
+        for i, frame in enumerate(frames):
+            td.feed(T0 + i * FRAME_S, frame)
+        td.close(finish=True)
+    assert_events(got, [(SPEECH_START, T0 + 0.4), (TURN_END, T0 + 1.0)])
+
+
+# End of stream
+
+
+def test_turn_detector_finish_ends_a_turn_while_still_speaking():
+    frames = tone_frames([("gap", 400), ("tone", 600)])
+    detector = TurnDetector(EnergyVad())
+    events = run_detector(detector, frames)
+    assert_events(events, [(SPEECH_START, T0 + 0.4)])
+    assert_events(detector.finish(), [(TURN_END, T0 + 1.0)])
+    assert not detector.in_turn
+    assert detector.finish() == []
+
+
+def test_turn_detector_finish_ends_a_turn_inside_the_end_silence_wait():
+    frames = tone_frames([("gap", 400), ("tone", 600), ("gap", 500)])
+    detector = TurnDetector(EnergyVad())
+    run_detector(detector, frames)
+    assert detector.in_turn
+    assert_events(detector.finish(), [(TURN_END, T0 + 1.0)])
+
+
+def test_turn_detector_finish_gives_nothing_without_a_turn():
+    frames = tone_frames([("gap", 400), ("tone", 60)])
+    detector = TurnDetector(EnergyVad())
+    assert run_detector(detector, frames) == []
+    assert detector.finish() == []
 
 
 # Registry
