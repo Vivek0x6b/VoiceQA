@@ -571,6 +571,29 @@ def test_load_silero_session_checks_the_session(monkeypatch):
     assert load_silero_session() is model.session
 
 
+def test_silero_vad_runs_one_window_when_built_so_the_first_call_frame_is_not_the_first_run(
+    monkeypatch,
+):
+    runs = []
+
+    class RunningSession(FakeSession):
+        def run(self, outputs, feed):
+            runs.append({name: value.copy() for name, value in feed.items()})
+            return np.array([[0.9]], np.float32), feed["h"] + 1, feed["c"] + 1
+
+    monkeypatch.setattr(vad, "load_silero_session", lambda: RunningSession())
+    silero = vad.SileroVad()
+    assert len(runs) == 1
+    assert runs[0]["input"].shape == (1, 576)
+    # The warm-up leaves no trace in the stream's state.
+    assert silero.window_count == 0
+    assert silero.process(np.zeros(FRAME, dtype=np.int16)) == 0.0
+    silero.process(np.zeros(FRAME, dtype=np.int16))
+    assert len(runs) == 2
+    assert not runs[1]["h"].any() and not runs[1]["c"].any()
+    assert not runs[1]["input"][0, :64].any()
+
+
 def test_check_silero_session_accepts_the_expected_model():
     check_silero_session(FakeSession())
 

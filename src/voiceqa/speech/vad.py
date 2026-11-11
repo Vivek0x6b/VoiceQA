@@ -194,6 +194,17 @@ class SileroVad:
 
     def __init__(self) -> None:
         self._session = load_silero_session()
+        # The first run of a new session does one-off set-up. Done here,
+        # before a call is dialed, instead of on the call's first window.
+        zeros = np.zeros(_SILERO_STATE_SHAPE, dtype=np.float32)
+        self._session.run(
+            _SILERO_OUTPUTS,
+            {
+                "input": np.zeros((1, SILERO_WINDOW + SILERO_CONTEXT), dtype=np.float32),
+                "h": zeros,
+                "c": zeros,
+            },
+        )
         self.reset()
 
     def reset(self) -> None:
