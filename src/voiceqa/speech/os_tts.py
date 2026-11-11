@@ -23,7 +23,13 @@ from pathlib import Path
 import numpy as np
 
 from .interfaces import Speech
-from .tts_process import DEFAULT_TIMEOUT, TtsError, read_speech_wav, run_tts_process
+from .tts_process import (
+    DEFAULT_TIMEOUT,
+    TtsError,
+    read_speech_wav,
+    run_tts_process,
+    run_tts_process_output,
+)
 
 OUTPUT_RATE = 22050
 
@@ -206,12 +212,15 @@ class SayTts:
             speech = None
             for _ in range(2):
                 out.unlink(missing_ok=True)
-                run_tts_process(args, label="say", timeout=self._timeout)
+                _, stderr = run_tts_process_output(args, label="say", timeout=self._timeout)
                 speech = read_speech_wav(out, "say")
                 if not _missing_audio(text, speech):
                     return speech
             seconds = len(speech.samples) / speech.rate
+            used = f"voice {voice!r}" if voice else "the default voice"
             raise TtsError(
                 f"say exited 0 but wrote no audio twice in a row ({seconds:.3f} s, "
-                f"peak {_peak(speech)}) for {len(text)} characters of text"
+                f"peak {_peak(speech)}, file {out.stat().st_size} bytes) for "
+                f"{len(text)} characters of text with {used}; "
+                f"say stderr: {stderr or '(empty)'}"
             )

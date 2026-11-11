@@ -47,6 +47,15 @@ def loud_frames(audio, threshold=2000):
     return int((frame_rms(audio) > threshold).sum())
 
 
+def tone_frames(audio, threshold=2000):
+    """Frames' worth of tone in audio: total energy over the energy of a full
+    tone frame. Unlike loud_frames, a frame placed off the 20 ms grid counts
+    once, not once in each grid frame it spills into."""
+    rms = frame_rms(audio)
+    full = np.median(rms[rms > threshold] ** 2)
+    return float((rms**2).sum() / full)
+
+
 def dominant_hz(audio):
     loud = audio.astype(np.float64)
     spectrum = np.abs(np.fft.rfft(loud))
@@ -334,7 +343,9 @@ def test_play_sends_the_wav_resampled_to_8k(tmp_path):
             await agent.close()
 
     got = asyncio.run(main())
-    assert 23 <= loud_frames(got) <= 26
+    # 0.5 s is 25 frames. Counted by energy, since a CI stall can place a
+    # received frame off the grid and make it two loud grid frames.
+    assert 24 <= tone_frames(got) <= 26
     assert abs(dominant_hz(got) - 600) < 5
 
 

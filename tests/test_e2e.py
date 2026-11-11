@@ -19,6 +19,7 @@ import time
 import numpy as np
 import pytest
 import yaml
+from tests_support import machine_state, say_probe
 
 from voiceqa.audio.analysis import first_loud_frame
 from voiceqa.audio.wav import read_wav, write_wav
@@ -225,6 +226,11 @@ def test_spoken_call_to_the_echo_agent_is_transcribed_on_both_sides(test_model, 
         agent_proc.wait(timeout=5)
 
     output = result.stdout + result.stderr
+    if result.returncode != 0 and sys.platform == "darwin":
+        # This failed on the macOS 3.11 CI job, where only the first line of
+        # the failure can be read, so the details go on that line.
+        output = " | ".join(output.strip().splitlines())
+        output = f"{output} | {say_probe(text)}; {machine_state()}"
     assert result.returncode == 0, output
     assert "answered      yes" in result.stdout, output
     transcript_path = record_dir / "transcript.json"

@@ -1,6 +1,8 @@
 import os
+import sys
 
 import pytest
+import tests_support
 
 from voiceqa.speech.model_cache import (
     STT_EXTRA_HINT,
@@ -10,6 +12,11 @@ from voiceqa.speech.model_cache import (
 )
 
 TEST_MODEL = "tiny.en"
+
+
+def pytest_sessionstart(session):
+    if sys.platform == "darwin":
+        tests_support.check_say_at_start()
 
 
 def _model_skip_reason() -> str | None:

@@ -6,11 +6,12 @@ import sys
 
 import numpy as np
 import pytest
+from tests_support import machine_state, say_probe
 
 from voiceqa.speech.os_tts import OUTPUT_RATE, SapiTts, SayTts, parse_say_voices
 from voiceqa.speech.registry import create_tts
 from voiceqa.speech.tts_cache import CachedTts
-from voiceqa.speech.tts_process import TtsError
+from voiceqa.speech.tts_process import TtsError, run_tts_process_output
 
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="SAPI is Windows only")
 macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="say is macOS only")
@@ -135,8 +136,13 @@ def fake_say(monkeypatch):
         write_wav(out, tone, OUTPUT_RATE)
         return b""
 
+    def run_output(args, **kwargs):
+        return run(args, **kwargs), calls.stderr
+
+    calls.stderr = ""
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(os_tts, "run_tts_process", run)
+    monkeypatch.setattr(os_tts, "run_tts_process_output", run_output)
     return calls
 
 
@@ -200,6 +206,32 @@ def test_say_that_writes_no_audio_twice_is_an_error_and_not_cached(fake_say, mon
     assert list(tmp_path.rglob("*.wav")) == []
 
 
+def test_run_tts_process_output_returns_stderr_of_a_successful_run():
+    code = "import sys; sys.stdout.write('out'); sys.stderr.write('  note on stderr \\n')"
+    out, err = run_tts_process_output([sys.executable, "-c", code], label="probe")
+    assert out == b"out"
+    assert err == "note on stderr"
+
+
+def test_say_giving_up_reports_stderr_file_size_and_the_voice(fake_say):
+    fake_say.durations = [0.005, 0.005]
+    fake_say.stderr = "Open speech channel failed: -128"
+    with pytest.raises(TtsError) as exc_info:
+        SayTts().synthesize("hello")
+    message = str(exc_info.value)
+    # A 0.005 s WAV at 22050 Hz: 110 samples after the 44-byte header.
+    assert "file 264 bytes" in message
+    assert "default voice" in message
+    assert "say stderr: Open speech channel failed: -128" in message
+
+    fake_say.durations = [0.005, 0.005]
+    fake_say.stderr = ""
+    with pytest.raises(TtsError) as exc_info:
+        SayTts().synthesize("hello", voice="Samantha")
+    assert "voice 'Samantha'" in str(exc_info.value)
+    assert "say stderr: (empty)" in str(exc_info.value)
+
+
 def test_say_short_output_for_text_with_nothing_to_say_is_fine(fake_say):
     fake_say.durations = [0.0]
     speech = SayTts().synthesize(" ... ")
@@ -207,11 +239,22 @@ def test_say_short_output_for_text_with_nothing_to_say_is_fine(fake_say):
     assert len(speech.samples) == 0
 
 
+def synthesize_or_explain(tts, text):
+    """tts.synthesize(text), failing with more to go on when `say` gives up:
+    the machine's state and whether the same text works with a named voice.
+    These failed on the macOS 3.11 CI job, where only the failure line can
+    be read."""
+    try:
+        return tts.synthesize(text)
+    except TtsError as exc:
+        pytest.fail(f"{exc}; {say_probe(text)}; {machine_state()}")
+
+
 @macos_only
 def test_say_speaks_a_sentence():
     tts = create_tts("say")
     assert isinstance(tts, SayTts)
-    speech = tts.synthesize(SENTENCE)
+    speech = synthesize_or_explain(tts, SENTENCE)
     assert speech.rate == OUTPUT_RATE
     assert_sounds_like_speech(speech, SENTENCE)
 
@@ -219,7 +262,7 @@ def test_say_speaks_a_sentence():
 @macos_only
 def test_say_text_cannot_inject_commands(tmp_path):
     text = INJECTION.format(d=tmp_path.as_posix())
-    speech = SayTts().synthesize(text)
+    speech = synthesize_or_explain(SayTts(), text)
     assert len(speech.samples) > 0
     assert list(tmp_path.iterdir()) == []
 

@@ -66,6 +66,20 @@ def run_tts_process(
     A non-zero exit or a timeout raises TtsError naming `label` and showing
     the program's stderr.
     """
+    out, _ = run_tts_process_output(args, label=label, stdin=stdin, timeout=timeout, env=env)
+    return out
+
+
+def run_tts_process_output(
+    args: Sequence[str],
+    *,
+    label: str,
+    stdin: bytes = b"",
+    timeout: float = DEFAULT_TIMEOUT,
+    env: Mapping[str, str] | None = None,
+) -> tuple[bytes, str]:
+    """run_tts_process, also returning the stderr of a run that exited 0
+    (as text, trimmed), for engines that can succeed without output."""
     if sys.platform == "win32":
         group = {"creationflags": subprocess.CREATE_NO_WINDOW}
     else:
@@ -99,7 +113,7 @@ def run_tts_process(
     if proc.returncode != 0:
         detail = _stderr_text(err) or "no message on stderr"
         raise TtsError(f"{label} failed (exit code {proc.returncode}): {detail}")
-    return out
+    return out, _stderr_text(err)
 
 
 def read_speech_wav(path: Path, label: str) -> Speech:
