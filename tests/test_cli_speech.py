@@ -86,6 +86,18 @@ def test_doctor_reports_the_stt_extra_missing(monkeypatch, models_env):
     assert f"stt extra:     not installed ({model_cache.STT_EXTRA_HINT})" in result.output
 
 
+def test_doctor_shows_silero_vad_with_the_stt_extra(monkeypatch, models_env):
+    monkeypatch.setattr(model_cache, "stt_extra_installed", lambda: True)
+    monkeypatch.setattr(cli, "_faster_whisper_version", lambda: "9.9.9")
+    result = runner.invoke(app, ["doctor"])
+    assert "vad:           silero and energy (auto uses silero)" in result.output
+
+
+def test_doctor_shows_energy_vad_without_the_stt_extra(models_env):
+    result = runner.invoke(app, ["doctor"])
+    assert "vad:           energy only (silero needs the [stt] extra)" in result.output
+
+
 def test_doctor_shows_models_dir_and_cached_models(models_env):
     make_cached_model(models_env, "tiny.en", 2 * 1024 * 1024)
     result = runner.invoke(app, ["doctor"])

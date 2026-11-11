@@ -40,6 +40,7 @@ from voiceqa.speech.models import Transcript
 from voiceqa.speech.registry import create_tts, default_tts_name
 from voiceqa.speech.tts_cache import CachedTts
 from voiceqa.speech.tts_process import TtsError
+from voiceqa.speech.vad import auto_vad_name
 from voiceqa.speech.worker import SttWorker, SttWorkerError
 from voiceqa.telephony.local.agent import AgentConfig, LocalAgent, load_prompt
 from voiceqa.telephony.media import SAMPLE_RATE, PayloadType
@@ -126,6 +127,10 @@ def doctor(models_dir: ModelsDirOption = None) -> None:
         _doctor_line("stt extra:", f"installed (faster-whisper{fw_version})")
     else:
         _doctor_line("stt extra:", f"not installed ({model_cache.STT_EXTRA_HINT})")
+    if auto_vad_name() == "silero":
+        _doctor_line("vad:", "silero and energy (auto uses silero)")
+    else:
+        _doctor_line("vad:", "energy only (silero needs the [stt] extra)")
     _echo_models_dir(models_dir)
     _echo_cached_models(models_dir)
 

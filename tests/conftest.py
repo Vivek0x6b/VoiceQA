@@ -23,13 +23,23 @@ def _model_skip_reason() -> str | None:
     return None
 
 
-@pytest.fixture(scope="session")
-def test_model() -> str:
-    """tiny.en's name, or a skip with the reason when it cannot run here."""
-    reason = _model_skip_reason()
+def _skip_or_fail(reason: str | None) -> None:
     if reason:
         # CI sets this so a missing model fails loudly instead of skipping.
         if os.environ.get("VOICEQA_REQUIRE_MODEL_TESTS"):
             pytest.fail(reason)
         pytest.skip(reason)
+
+
+@pytest.fixture(scope="session")
+def test_model() -> str:
+    """tiny.en's name, or a skip with the reason when it cannot run here."""
+    _skip_or_fail(_model_skip_reason())
     return TEST_MODEL
+
+
+@pytest.fixture(scope="session")
+def silero_extra() -> None:
+    """Skips when the [stt] extra is missing. The Silero model ships inside
+    the faster-whisper wheel, so nothing else is needed."""
+    _skip_or_fail(None if stt_extra_installed() else f"needs the [stt] extra: {STT_EXTRA_HINT}")

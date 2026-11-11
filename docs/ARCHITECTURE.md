@@ -92,6 +92,13 @@ VoiceQA is a local-first QA lab for AI voice agents. It places real SIP calls to
 - `run_call` resolves the SIP server once with `resolve_server` (from the SIP layer) and passes the address to `place_call(server=...)`, which only resolves on its own when it is not given one.
 - The speech loopback test (`tests/test_e2e.py`) speaks with the OS's default engine where there is one (sapi, say) and with a WAV prompt cut from the LibriVox clip on Linux, so each OS tests its own default path. It checks content only: exit 0, caller and agent segments, and WER per side within 0.35. It asserts no segment start times, since faster-whisper puts the first word early (see known problems), and no wall-clock bounds. It carries the `model` marker, so it follows the same skip and CI rules as the other real-model tests.
 - Help text goes through Rich markup in Typer, so a literal "[stt]" in a help string or command docstring is written `\[stt]`. A test checks every bracketed word in every command's help.
+- VAD (`speech/vad.py`): a `Vad` takes 20 ms int16 frames at 8 kHz and returns a speech probability per frame. `create_vad(name, **kwargs)` builds `energy`, `silero` or `auto` from plain keyword arguments. `auto` is Silero when the `[stt]` extra is installed, else energy, and then logs a one-line notice (`ENERGY_FALLBACK_NOTICE`, INFO) for the CLI to show; it takes no options. `silero` without the extra raises `SttExtraMissingError` with the same install hint as STT. `voiceqa doctor` shows which VAD is available.
+- The energy VAD gives 1.0 when a frame's RMS is at least `threshold_dbfs` (-45) and at least `margin_db` (10) above a noise floor, else 0.0. The floor starts at the first frame that is not digital silence, follows quieter frames down at once and rises at most 2 dB/s; digital silence (under -90 dBFS) never moves it. It is cheap enough to run inline in a media callback. It is the CI path and the scripted test agent's VAD; on real phone audio with comfort noise Silero is better.
+- The Silero model is the 16 kHz `silero_vad_v6.onnx` (Silero VAD, MIT, snakers4/silero-vad) inside the faster-whisper wheel, 1,245,151 bytes, loaded only through `faster_whisper.vad.get_vad_model()`, never by a file path. Nothing is downloaded. The `silero-vad` PyPI package is not used because it depends on torch, and the upstream 8 kHz model is not used. onnxruntime (MIT) comes with the `[stt]` extra already: 1.31.1, wheels 14.9 MB win_amd64, 20.9 MB macOS arm64, 23.8 MB Linux x86_64. Checked 2026-11-10.
+- faster-whisper's own model call resets the LSTM state on every call, so `SileroVad` drives the model's `.session` (onnxruntime, one thread) itself and carries h, c and the 64-sample context from one 512-sample window to the next, as faster-whisper does inside one whole-clip call. `.session` is not documented faster-whisper API; `load_silero_session()` checks the input and output names and shapes and raises `SileroModelError` naming the faster-whisper version and what to check, and a test runs that check wherever the extra is installed.
+- 8 kHz frames are upsampled with `StreamResampler` (`audio/dsp.py`), which runs our `resample` over the frame boundary with enough past input kept and holds back the last 2 ms until the next frame, so streaming gives the same samples as one pass (within 1 LSB). A test checks that the streamed probabilities match faster-whisper's own whole-clip call within 0.01. A 32 ms window does not line up with a 20 ms frame: each frame gets the latest finished window's probability (0.0 before the first), so it describes audio that ends up to about 34 ms before the frame ends. Frame times are never changed.
+- `TurnDetector` takes `(at, frame)` with the frame's time on the caller's clock (`media_clock` in a call). speech_start comes after `min_speech_ms` (100) of unbroken speech frames and turn_end after `end_silence_ms` (700) since the end of the last speech frame, measured by frame times, so dropped frames still count as time. Event times are the start of the first speech frame and the end of the last one, never the moment of the decision, so the end-of-turn wait does not leak into latency.
+- Silero runs in `ThreadedTurnDetector`: its own thread in the calling process, fed through a bounded queue (50 frames, 1 s). `feed()` never blocks; when the queue is full the frame is dropped and counted in `dropped_frames`. Events go to an `on_event` callback in the detector's thread, which hands them to asyncio with `loop.call_soon_threadsafe`. An error in the detector is raised by `close()`.
 
 ## STT CPU baseline (informational)
 
@@ -135,7 +142,7 @@ src/voiceqa/
   audio/            codecs, resampling, audio analysis
     g711.py         PCMU and PCMA encode and decode
     wav.py          16-bit PCM WAV read and write
-    dsp.py          downmix, resampling, test tones
+    dsp.py          downmix, resampling (whole clip and streamed), test tones
     analysis.py     first loud frame in a WAV, pulse onset and round-trip timing
   telephony/media.py  SIP to RTP contract (LocalMedia, RemoteMedia, MediaSession, MediaSink)
   telephony/recording.py  call recorder: caller.wav, agent.wav, mix.wav, events.json
@@ -161,6 +168,7 @@ src/voiceqa/
     bench.py        STT speed check on the test clip (voiceqa bench stt)
     worker.py       SttWorker: STT engine in a spawned child process
     wer.py          word error rate
+    vad.py          energy and Silero VAD, TurnDetector, ThreadedTurnDetector, create_vad
   cli/              Typer commands
   __main__.py       lets `python -m voiceqa` run the CLI
 tests/

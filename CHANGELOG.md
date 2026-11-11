@@ -64,6 +64,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `create_tts(name, **kwargs)` and `create_stt(name, **kwargs)`: look up a TTS or STT engine by name (`wav`, `fake`, `sapi`, `say`, `faster-whisper`, `plugin:<name>`) from plain, picklable keyword arguments only. An unknown name raises `ValueError` listing the known engines.
 - `SttWorker.start_async()`, and `async with SttWorker(...)`, spawn the child from a thread so the event loop keeps running. A cancelled start closes the worker at once, so a retry is refused, and stops the child once it is up, from a thread of its own.
 - `FakeStt(echo=True)` returns a segment describing the job ("800 samples at 8000 Hz"), so a test can tell when a result went to the wrong job.
+- Voice activity and end-of-turn detection (`voiceqa.speech.vad`): an energy VAD (NumPy only) and a Silero VAD that uses the model faster-whisper ships, picked with `create_vad("energy" | "silero" | "auto")`. `TurnDetector` reports when a turn starts and ends, timed at the first and last speech frame, after 100 ms of speech and 700 ms of silence by default. `ThreadedTurnDetector` runs it in its own thread behind a bounded queue and counts frames it had to drop. `voiceqa doctor` shows which VAD is available.
+- `StreamResampler`: our resampler for audio that arrives in frames, with the same output as one pass over the whole clip.
 
 ### Changed
 
