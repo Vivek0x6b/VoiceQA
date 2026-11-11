@@ -3,7 +3,7 @@ import time
 import numpy as np
 import pytest
 
-from voiceqa.audio.dsp import generate_tone, resample, to_mono
+from voiceqa.audio.dsp import StreamResampler, generate_tone, resample, to_mono
 
 
 def peak_hz(samples: np.ndarray, rate: int) -> float:
@@ -91,6 +91,28 @@ def test_resample_clips_overshoot():
     )
     assert not flips.any()
     assert out.max() == 32767
+
+
+def stream_in_frames(stream: StreamResampler, x: np.ndarray, frame: int) -> np.ndarray:
+    return np.concatenate([stream.push(x[i : i + frame]) for i in range(0, len(x), frame)])
+
+
+@pytest.mark.parametrize("frame", [160, 1, 37, 1000])
+def test_stream_resampler_matches_one_pass(frame):
+    rng = np.random.default_rng(3)
+    x = (generate_tone(440, 2.0, 8000, 0.3) + rng.integers(-3000, 3000, 16000)).astype(np.int16)
+    whole = resample(x, 8000, 16000)
+    streamed = stream_in_frames(StreamResampler(8000, 16000), x, frame)
+    assert streamed.dtype == np.int16
+    # Only the last few outputs wait for input that has not arrived yet.
+    assert len(whole) - 64 <= len(streamed) <= len(whole)
+    diff = np.abs(streamed.astype(np.int32) - whole[: len(streamed)].astype(np.int32))
+    assert diff.max() <= 1
+
+
+def test_stream_resampler_needs_an_integer_factor():
+    with pytest.raises(ValueError, match="integer"):
+        StreamResampler(16000, 8000)
 
 
 def test_resample_60s_48k_under_1s():

@@ -62,6 +62,47 @@ def resample(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     return np.clip(np.round(out), -32768, 32767).astype(np.int16)
 
 
+class StreamResampler:
+    """`resample` for audio that arrives in pieces, by an integer factor.
+
+    Resampling each piece on its own would put filter edge effects at every
+    boundary. This keeps enough past input to run `resample` over the
+    boundary and returns only outputs whose whole filter window has
+    arrived, so the concatenated output matches one pass over the joined
+    input (within 1 LSB of float rounding). The last (half - 1) * factor
+    outputs, about 2 ms, wait for the next push.
+    """
+
+    def __init__(self, src_rate: int, dst_rate: int) -> None:
+        if dst_rate % src_rate:
+            raise ValueError(
+                f"StreamResampler needs an integer factor, got {src_rate} to {dst_rate} Hz"
+            )
+        self._src = src_rate
+        self._dst = dst_rate
+        self._up = dst_rate // src_rate
+        _, self._half = _kernel_table(self._up, 1)
+        # Input samples still needed, starting at input index self._first.
+        self._kept = np.zeros(0, dtype=np.int16)
+        self._first = 0
+        self._next_out = 0
+
+    def push(self, samples: np.ndarray) -> np.ndarray:
+        self._kept = np.concatenate([self._kept, np.asarray(samples, dtype=np.int16)])
+        end = self._first + len(self._kept)
+        # Output n reads input samples n // up - half up to n // up + half - 1.
+        stop = max(self._next_out, (end - self._half + 1) * self._up)
+        out = resample(self._kept, self._src, self._dst)
+        offset = self._first * self._up
+        ready = out[self._next_out - offset : stop - offset]
+        self._next_out = stop
+        drop = stop // self._up - self._half - self._first
+        if drop > 0:
+            self._kept = self._kept[drop:]
+            self._first += drop
+        return ready
+
+
 def generate_tone(
     freq_hz: float, duration_s: float, sample_rate: int = 8000, amplitude: float = 0.5
 ) -> np.ndarray:
