@@ -44,8 +44,17 @@ class TimedRtp(RtpSession):
 async def one_call(record_dir, vad, speech, seconds):
     agent = await LocalAgent.start(AgentConfig(host="127.0.0.1", port=0, timer_t1=0.02, play=CLIP))
     try:
+        # freeze_heap as the CLI runs it: the check is about the call path
+        # a user gets, which includes the pre-dial collect and freeze.
         session = CallSession(
-            "agent", "127.0.0.1", agent.local_addr[1], "1001", "", record_dir, vad=vad
+            "agent",
+            "127.0.0.1",
+            agent.local_addr[1],
+            "1001",
+            "",
+            record_dir,
+            vad=vad,
+            freeze_heap=True,
         )
         async with session:
             await session.say(speech[: round((seconds - 1) * SAMPLE_RATE)])

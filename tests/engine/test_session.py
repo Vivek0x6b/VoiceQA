@@ -498,7 +498,7 @@ def test_heap_is_collected_and_frozen_before_dialing_and_released_after(tmp_path
     async def main():
         agent = await start_agent(tmp_path, noise(2.0))
         try:
-            async with session_for(agent, tmp_path / "run") as session:
+            async with session_for(agent, tmp_path / "run", freeze_heap=True) as session:
                 seen["frozen in call"] = gc.get_freeze_count()
                 with pytest.raises(TimeoutError):
                     await session.next_agent_turn(timeout=0.3)
@@ -511,6 +511,38 @@ def test_heap_is_collected_and_frozen_before_dialing_and_released_after(tmp_path
     assert seen["frozen in call"] > 0
     assert seen["cycle alive at dial"] is False
     assert gc.get_freeze_count() == 0
+
+
+def test_library_use_leaves_the_gc_heap_alone(tmp_path, monkeypatch):
+    """freeze_heap is off by default: a program that embeds CallSession
+    keeps its own GC state, and an earlier freeze of its own survives."""
+    seen = {}
+    real_place_call = session_module.place_call
+
+    async def place_call(*args, **kwargs):
+        seen["frozen at dial"] = gc.get_freeze_count()
+        return await real_place_call(*args, **kwargs)
+
+    monkeypatch.setattr(session_module, "place_call", place_call)
+    gc.freeze()
+    own = gc.get_freeze_count()
+    assert own > 0
+    try:
+
+        async def main():
+            agent = await start_agent(tmp_path, noise(2.0))
+            try:
+                async with session_for(agent, tmp_path / "run") as session:
+                    with pytest.raises(TimeoutError):
+                        await session.next_agent_turn(timeout=0.3)
+            finally:
+                await agent.close()
+
+        asyncio.run(main())
+        assert seen["frozen at dial"] == own
+        assert gc.get_freeze_count() == own
+    finally:
+        gc.unfreeze()
 
 
 def test_auto_vad_fallback_notice_is_exposed_before_dialing(monkeypatch):

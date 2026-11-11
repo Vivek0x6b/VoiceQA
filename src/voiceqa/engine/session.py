@@ -181,10 +181,16 @@ class CallSession:
         end_silence_ms: float = 700,
         min_speech_ms: float = 100,
         stt_timeout: float = 60.0,
+        freeze_heap: bool = False,
     ) -> None:
         """Builds the VAD (loading Silero if that is the one) but does not
         dial; start() or `async with` does. `vad` is a name for create_vad,
-        a Vad, or None for no turn detection at all."""
+        a Vad, or None for no turn detection at all.
+
+        `freeze_heap` collects and freezes the process's GC heap before
+        dialing (see _freeze_heap). It changes process-wide GC state, so
+        it is off by default and only the voiceqa CLI, which owns its
+        process, turns it on."""
         self.target = target
         self.record_dir = Path(record_dir)
         self._sip_config = SipConfig(
@@ -196,6 +202,7 @@ class CallSession:
         self._stt = stt
         self._codec = codec
         self._stt_timeout = stt_timeout
+        self._freeze_heap = freeze_heap
         self.vad_notice: str | None = None
         if isinstance(vad, str):
             self.vad_notice = vad_notice(vad)
@@ -267,8 +274,9 @@ class CallSession:
         self._started = True
         self._loop = asyncio.get_running_loop()
         self._rec = CallRecorder(self.record_dir)
-        _freeze_heap()
-        self._frozen = True
+        if self._freeze_heap:
+            _freeze_heap()
+            self._frozen = True
         try:
             await self._dial()
         except BaseException:
