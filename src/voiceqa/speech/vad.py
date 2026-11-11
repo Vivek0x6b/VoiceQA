@@ -50,6 +50,8 @@ ENERGY_FALLBACK_NOTICE = (
 
 # Frames quieter than this are digital silence (zeros, or nearly), not noise.
 _SILENT_DBFS = -90.0
+# This much digital silence in a row means the line is quiet (see EnergyVad).
+_QUIET_RESET_MS = 100
 # Frame times are sums of floats; this keeps 700 ms of silence from reading
 # as 699.9999999 ms.
 _TIME_EPS = 1e-6
@@ -80,6 +82,13 @@ class EnergyVad:
     follows quieter frames down at once and rises at most
     `floor_rise_db_per_s`, so steady noise becomes the floor within a few
     seconds while speech, which keeps dipping between words, does not.
+
+    At least 100 ms of digital silence (PCMU silence decodes to zeros) means
+    nothing is on the line: the next sound finds the floor at no more than
+    `threshold_dbfs - margin_db`, so speech after silence counts even when it
+    is the first sound of the stream. A shorter dropout leaves the floor
+    alone. A sound in the very first frame, with nothing before it, cannot
+    be told from line noise and becomes the floor.
     """
 
     name = "energy"
@@ -94,6 +103,7 @@ class EnergyVad:
         self.margin_db = margin_db
         self.floor_rise_db_per_s = floor_rise_db_per_s
         self._floor: float | None = None
+        self._quiet_samples = 0
 
     @property
     def noise_floor_db(self) -> float | None:
@@ -101,6 +111,7 @@ class EnergyVad:
 
     def reset(self) -> None:
         self._floor = None
+        self._quiet_samples = 0
 
     def process(self, frame: np.ndarray) -> float:
         _check_frame(frame)
@@ -108,7 +119,13 @@ class EnergyVad:
             return 0.0
         rms = math.sqrt(float(np.mean(frame.astype(np.float64) ** 2))) / 32768.0
         level = 20.0 * math.log10(max(rms, 1e-5))
-        if level > _SILENT_DBFS:
+        if level <= _SILENT_DBFS:
+            self._quiet_samples += len(frame)
+        else:
+            if self._quiet_samples * 1000 >= _QUIET_RESET_MS * RATE:
+                lowest = self.threshold_dbfs - self.margin_db
+                self._floor = lowest if self._floor is None else min(self._floor, lowest)
+            self._quiet_samples = 0
             if self._floor is None or level < self._floor:
                 self._floor = level
             else:

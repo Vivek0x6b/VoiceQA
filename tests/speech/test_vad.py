@@ -124,6 +124,53 @@ def test_energy_vad_first_sound_sets_the_floor_and_reset_forgets_it():
     assert v.noise_floor_db is None
 
 
+def silent_frames(n):
+    return [np.zeros(FRAME, dtype=np.int16) for _ in range(n)]
+
+
+def test_energy_vad_finds_speech_after_digital_silence():
+    # PCMU silence decodes to exact zeros, so a caller's stream often starts
+    # with nothing but digital silence before the first word.
+    v = EnergyVad()
+    tone = generate_tone(1000, 0.2, RATE, 0.3)
+    frames = silent_frames(15) + [tone[i : i + FRAME] for i in range(0, len(tone), FRAME)]
+    assert [v.process(f) for f in frames] == [0.0] * 15 + [1.0] * 10
+
+
+def test_energy_vad_speech_in_the_very_first_frame_is_taken_as_the_floor():
+    # With nothing before it, a steady sound cannot be told from line noise,
+    # so it becomes the floor. 100 ms of digital silence after it means the
+    # line is quiet, and the same sound is speech again.
+    v = EnergyVad()
+    tone = [generate_tone(1000, 0.02, RATE, 0.3)] * 10
+    assert [v.process(f) for f in tone] == [0.0] * 10
+    assert [v.process(f) for f in silent_frames(5) + tone] == [0.0] * 5 + [1.0] * 10
+
+
+def test_energy_vad_needs_100_ms_of_digital_silence_to_drop_a_loud_floor():
+    rng = np.random.default_rng(3)
+    noise = [rng.normal(0, 580, FRAME).astype(np.int16) for _ in range(20)]
+    short = EnergyVad(threshold_dbfs=-60.0, margin_db=10.0)
+    for f in noise:
+        short.process(f)
+    # 80 ms of dropout: the noise is still the floor.
+    assert [short.process(f) for f in silent_frames(4) + noise[:3]] == [0.0] * 7
+    long = EnergyVad(threshold_dbfs=-60.0, margin_db=10.0)
+    for f in noise:
+        long.process(f)
+    # 100 ms: the floor drops to threshold - margin, so the noise reads as sound.
+    assert [long.process(f) for f in silent_frames(5) + noise[:1]] == [0.0] * 5 + [1.0]
+    assert long.noise_floor_db < -69.0
+
+
+def test_energy_vad_reset_forgets_a_silence_run():
+    v = EnergyVad()
+    for f in silent_frames(10):
+        v.process(f)
+    v.reset()
+    assert v.process(generate_tone(1000, 0.02, RATE, 0.3)) == 0.0
+
+
 def test_energy_vad_rejects_non_int16():
     with pytest.raises(TypeError, match="int16"):
         EnergyVad().process(np.zeros(FRAME, dtype=np.float32))

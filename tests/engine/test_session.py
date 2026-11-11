@@ -46,9 +46,13 @@ SCRIPTED = Transcript(engine="fake", model="echo", language="en")
 
 
 def noise(seconds, seed=0):
-    # Low noise for the energy VAD's floor; digital silence never sets it.
+    # Low noise: sound on the line that is not speech.
     rng = np.random.default_rng(seed)
     return rng.integers(-30, 31, round(seconds * SAMPLE_RATE)).astype(np.int16)
+
+
+def silence(seconds):
+    return np.zeros(round(seconds * SAMPLE_RATE), dtype=np.int16)
 
 
 def tone(seconds, freq=1000):
@@ -101,8 +105,8 @@ def events_of(record_dir):
 
 
 # Two agent turns from the WAV playback agent: 600 ms and 400 ms of tone
-# with 1 s of noise between, more than the 700 ms end of turn.
-TWO_TURNS = clip(noise(0.4), tone(0.6), noise(1.0), tone(0.4), noise(1.0))
+# with 1 s of digital silence between, more than the 700 ms end of turn.
+TWO_TURNS = clip(silence(0.4), tone(0.6), silence(1.0), tone(0.4), silence(1.0))
 
 
 def test_session_finds_agent_turns_and_transcribes_each_in_the_worker(tmp_path):
@@ -127,7 +131,7 @@ def test_session_finds_agent_turns_and_transcribes_each_in_the_worker(tmp_path):
     assert second.start - first.end == pytest.approx(1.0, abs=EXACT)
     assert second.end - second.start == pytest.approx(0.4, abs=EXACT)
     assert len(first.samples) == round((first.end - first.start) * SAMPLE_RATE)
-    # The turn's audio is the tone, not silence or noise.
+    # The turn's audio is the tone, not silence.
     assert np.abs(first.samples.astype(np.int32)).max() > 5000
     # Each job is the turn plus 200 ms either side, so the echo tells them apart.
     n1 = round((first.end - first.start + 0.4) * SAMPLE_RATE)
@@ -167,7 +171,7 @@ def test_session_finds_agent_turns_and_transcribes_each_in_the_worker(tmp_path):
 
 def test_say_reports_slot_times_and_lands_in_events_and_transcript(tmp_path):
     record_dir = tmp_path / "run"
-    audio = clip(noise(0.2), tone(0.5))
+    audio = clip(silence(0.2), tone(0.5))
 
     async def main():
         agent = await start_agent(tmp_path)  # echo agent
@@ -216,7 +220,7 @@ class ReplyAgent(LocalAgent):
 
     DELAY = 1.5
     LEAD = 0.3
-    REPLY = clip(noise(LEAD, seed=1), tone(0.6, 700), noise(0.3, seed=2))
+    REPLY = clip(silence(LEAD), tone(0.6, 700), silence(0.3))
 
     async def _on_call(self, call):
         ends = asyncio.Queue()
@@ -234,7 +238,7 @@ class ReplyAgent(LocalAgent):
         call.media.record(Sink())
         while not call.ended:
             end = await ends.get()
-            # The reply's tone begins after LEAD seconds of noise.
+            # The reply's tone begins after LEAD seconds of silence.
             await asyncio.sleep(max(0.0, end + self.DELAY - self.LEAD - media_clock()))
             call.media.send(self.REPLY)
 
@@ -247,7 +251,7 @@ def test_gap_from_say_end_to_agent_speech_is_the_agents_delay(tmp_path):
         try:
             session = session_for(agent, tmp_path / "run")
             async with session:
-                said = await session.say(clip(noise(0.3), tone(1.0)), text="question")
+                said = await session.say(clip(silence(0.3), tone(1.0)), text="question")
                 turn = await session.next_agent_turn(timeout=10)
             return said, turn
         finally:
@@ -264,14 +268,14 @@ def test_gap_from_say_end_to_agent_speech_is_the_agents_delay(tmp_path):
 
 def test_overlap_is_recorded_when_the_agent_starts_during_a_say(tmp_path):
     record_dir = tmp_path / "run"
-    agent_prompt = clip(noise(1.0), tone(1.0), noise(1.0))
+    agent_prompt = clip(silence(1.0), tone(1.0), silence(1.0))
 
     async def main():
         agent = await start_agent(tmp_path, agent_prompt)
         try:
             session = session_for(agent, record_dir)
             async with session:
-                await session.say(clip(noise(0.2), tone(2.8)))
+                await session.say(clip(silence(0.2), tone(2.8)))
                 await session.next_agent_turn(timeout=10)
         finally:
             await agent.close()
@@ -289,7 +293,7 @@ def test_overlap_is_recorded_when_the_agent_starts_during_a_say(tmp_path):
 
 def test_overlap_is_recorded_when_we_start_while_the_agent_speaks(tmp_path):
     record_dir = tmp_path / "run"
-    agent_prompt = clip(noise(0.3), tone(3.0), noise(1.0))
+    agent_prompt = clip(silence(0.3), tone(3.0), silence(1.0))
 
     async def main():
         agent = await start_agent(tmp_path, agent_prompt)
@@ -341,7 +345,7 @@ def test_overlap_counts_a_say_that_began_before_the_late_speech_start():
 def test_far_end_hangup_ends_the_open_turn_at_its_last_speech_frame(tmp_path):
     record_dir = tmp_path / "run"
     # The agent hangs up 1.5 s after answering, in the middle of its tone.
-    agent_prompt = clip(noise(0.3), tone(3.0))
+    agent_prompt = clip(silence(0.3), tone(3.0))
 
     async def main():
         agent = await start_agent(tmp_path, agent_prompt, hangup_after=1.5)
