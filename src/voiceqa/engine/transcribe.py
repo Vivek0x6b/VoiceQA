@@ -80,7 +80,10 @@ def read_chunks(
         yield start, buffered, rate
 
 
-def _shifted(segment: Segment, offset: float, speaker: str) -> Segment:
+def shift_segment(
+    segment: Segment, offset: float, speaker: str, turn: str | None = None
+) -> Segment:
+    """The segment and its words moved by offset seconds and tagged."""
     words = [
         w.model_copy(update={"start": w.start + offset, "end": w.end + offset})
         for w in segment.words
@@ -91,6 +94,7 @@ def _shifted(segment: Segment, offset: float, speaker: str) -> Segment:
             "end": segment.end + offset,
             "words": words,
             "speaker": speaker,
+            "turn": turn,
         }
     )
 
@@ -110,7 +114,7 @@ async def transcribe_run(
         for start, samples, rate in read_chunks(path, chunk_seconds):
             part = await stt.transcribe(samples, rate)
             parts.append(part)
-            segments.extend(_shifted(s, start / rate, speaker) for s in part.segments)
+            segments.extend(shift_segment(s, start / rate, speaker) for s in part.segments)
 
     segments.sort(key=lambda s: s.start)
     languages = sorted({p.language for p in parts if p.language})
@@ -124,5 +128,9 @@ async def transcribe_run(
 
 def write_transcript(run_dir: str | Path, transcript: Transcript) -> Path:
     path = Path(run_dir) / TRANSCRIPT_FILE
-    path.write_text(transcript.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    # Leaves out `turn` outside scenario runs (and nothing else: the other
+    # fields are never None in a run transcript).
+    path.write_text(
+        transcript.model_dump_json(indent=2, exclude_none=True) + "\n", encoding="utf-8"
+    )
     return path

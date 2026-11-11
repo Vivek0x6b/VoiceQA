@@ -16,6 +16,8 @@ class Segment(BaseModel):
     text: str
     words: list[Word] = []
     speaker: str | None = None
+    # Set in scenario runs: the turn id from events.json ("agent-1", "caller-2").
+    turn: str | None = None
 
 
 class Transcript(BaseModel):

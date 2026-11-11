@@ -124,6 +124,11 @@ class CallRecorder:
         self._first_in = True
         self._closed = False
 
+    @property
+    def t0(self) -> float:
+        """Time zero of events.json and the WAVs, on the recorder's clock."""
+        return self._t0
+
     def __enter__(self) -> "CallRecorder":
         return self
 
