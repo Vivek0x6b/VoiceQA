@@ -2,6 +2,7 @@
 the CI runners for those OSes have them. Output is checked for length and
 level, never for what was said."""
 
+import logging
 import sys
 
 import numpy as np
@@ -198,12 +199,48 @@ def test_say_retries_once_when_it_writes_an_empty_wav(fake_say):
 
 def test_say_that_writes_no_audio_twice_is_an_error_and_not_cached(fake_say, monkeypatch, tmp_path):
     monkeypatch.setenv("VOICEQA_CACHE_DIR", str(tmp_path))
-    fake_say.durations = [0.005, 0.0]
+    # Default voice twice, then the named fallback voice twice.
+    fake_say.durations = [0.005, 0.0, 0.005, 0.0]
     with pytest.raises(TtsError, match="no audio") as exc_info:
         CachedTts(SayTts()).synthesize("hello")
     assert "twice" in str(exc_info.value)
-    assert len(fake_say) == 2
+    speaks = [c for c in fake_say if "-o" in c]
+    assert len(speaks) == 4
     assert list(tmp_path.rglob("*.wav")) == []
+
+
+def test_say_default_voice_without_audio_falls_back_to_a_named_voice(fake_say, caplog):
+    # A Mac with no default voice set (no com.apple.speech.voice.prefs, as on
+    # one macOS CI runner image) writes silence for the default voice while
+    # a named voice works.
+    fake_say.durations = [0.005, 0.005]
+    with caplog.at_level(logging.WARNING, logger="voiceqa.speech.os_tts"):
+        speech = SayTts().synthesize("hello")
+    assert len(speech.samples) == round(0.2 * OUTPUT_RATE)
+    speaks = [c for c in fake_say if "-o" in c]
+    assert len(speaks) == 3
+    assert "-v" not in speaks[0] and "-v" not in speaks[1]
+    assert speaks[2][1:3] == ["-v", "Samantha"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("default voice" in w and "Samantha" in w for w in warnings)
+
+
+def test_say_fallback_takes_the_first_listed_voice_when_none_preferred(fake_say, monkeypatch):
+    from voiceqa.speech import os_tts
+
+    monkeypatch.setattr(os_tts.SayTts, "voices", lambda self: ["Eddy (English (UK))", "Zoe"])
+    fake_say.durations = [0.005, 0.005]
+    SayTts().synthesize("hello")
+    speaks = [c for c in fake_say if "-o" in c]
+    assert speaks[2][1:3] == ["-v", "Eddy (English (UK))"]
+
+
+def test_say_named_voice_without_audio_does_not_fall_back(fake_say):
+    fake_say.durations = [0.005, 0.005]
+    with pytest.raises(TtsError, match="voice 'Albert'"):
+        SayTts().synthesize("hello", voice="Albert")
+    speaks = [c for c in fake_say if "-o" in c]
+    assert len(speaks) == 2
 
 
 def test_run_tts_process_output_returns_stderr_of_a_successful_run():
@@ -214,7 +251,7 @@ def test_run_tts_process_output_returns_stderr_of_a_successful_run():
 
 
 def test_say_giving_up_reports_stderr_file_size_and_the_voice(fake_say):
-    fake_say.durations = [0.005, 0.005]
+    fake_say.durations = [0.005, 0.005, 0.005, 0.005]
     fake_say.stderr = "Open speech channel failed: -128"
     with pytest.raises(TtsError) as exc_info:
         SayTts().synthesize("hello")
@@ -222,6 +259,7 @@ def test_say_giving_up_reports_stderr_file_size_and_the_voice(fake_say):
     # A 0.005 s WAV at 22050 Hz: 110 samples after the 44-byte header.
     assert "file 264 bytes" in message
     assert "default voice" in message
+    assert "also with voice 'Samantha'" in message
     assert "say stderr: Open speech channel failed: -128" in message
 
     fake_say.durations = [0.005, 0.005]

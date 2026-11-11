@@ -14,6 +14,7 @@ Both return the engine's own sample rate (22050 Hz); calls resample later.
 """
 
 import base64
+import logging
 import os
 import shutil
 import sys
@@ -32,6 +33,13 @@ from .tts_process import (
 )
 
 OUTPUT_RATE = 22050
+
+logger = logging.getLogger(__name__)
+
+# Tried in order when the default voice writes no audio. A Mac with no
+# default voice set (no com.apple.speech.voice.prefs) writes silence for
+# the default voice while named voices work.
+SAY_FALLBACK_VOICES = ("Samantha", "Alex", "Albert")
 
 # Errors are written straight to the console's stderr and the script exits
 # 1: PowerShell's own error output would arrive as CLIXML, since its output
@@ -165,6 +173,10 @@ class SapiTts:
             return read_speech_wav(out, "sapi")
 
 
+class _NoAudioError(TtsError):
+    """say exited 0 twice without writing audio."""
+
+
 class SayTts:
     def __init__(self, timeout: float = DEFAULT_TIMEOUT) -> None:
         if sys.platform != "darwin":
@@ -193,6 +205,33 @@ class SayTts:
         raise TtsError(f"{message}. See the voices with: voiceqa say --list-voices --tts say")
 
     def synthesize(self, text: str, voice: str | None = None) -> Speech:
+        if voice:
+            self._check_voice(voice)
+            return self._speak(text, voice)
+        try:
+            return self._speak(text, None)
+        except _NoAudioError as exc:
+            fallback = self._fallback_voice()
+            if fallback is None:
+                raise TtsError(str(exc)) from None
+            logger.warning(
+                "say wrote no audio with the default voice; using voice %r. "
+                "Set a default voice in System Settings, or pass --voice.",
+                fallback,
+            )
+            try:
+                return self._speak(text, fallback)
+            except _NoAudioError as again:
+                raise TtsError(f"{exc}; also with voice {fallback!r}: {again}") from None
+
+    def _fallback_voice(self) -> str | None:
+        names = self.voices()
+        preferred = [v for v in SAY_FALLBACK_VOICES if v in names]
+        if preferred:
+            return preferred[0]
+        return names[0] if names else None
+
+    def _speak(self, text: str, voice: str | None) -> Speech:
         with tempfile.TemporaryDirectory(prefix="voiceqa-say-") as tmp:
             text_path = Path(tmp) / "text.txt"
             text_path.write_text(text, encoding="utf-8")
@@ -207,7 +246,6 @@ class SayTts:
                 str(text_path),
             ]
             if voice:
-                self._check_voice(voice)
                 args[1:1] = ["-v", voice]
             speech = None
             for _ in range(2):
@@ -218,7 +256,7 @@ class SayTts:
                     return speech
             seconds = len(speech.samples) / speech.rate
             used = f"voice {voice!r}" if voice else "the default voice"
-            raise TtsError(
+            raise _NoAudioError(
                 f"say exited 0 but wrote no audio twice in a row ({seconds:.3f} s, "
                 f"peak {_peak(speech)}, file {out.stat().st_size} bytes) for "
                 f"{len(text)} characters of text with {used}; "

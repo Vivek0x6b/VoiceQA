@@ -115,7 +115,7 @@ audio         3.71 s at 22050 Hz
 saved         hello.wav
 ```
 
-`voiceqa say --list-voices` prints the voice names for `--voice`. Speech from the OS engines and from plugins is cached per user, so the same text and voice is instant the second time. Set `VOICEQA_CACHE_DIR` to move the cache.
+`voiceqa say --list-voices` prints the voice names for `--voice`. On a Mac with no default voice set, `say` falls back to an installed voice such as Samantha and prints a warning; set a default voice in System Settings or pass `--voice` to choose. Speech from the OS engines and from plugins is cached per user, so the same text and voice is instant the second time. Set `VOICEQA_CACHE_DIR` to move the cache.
 
 ### Outside TTS engines (plugins)
 
