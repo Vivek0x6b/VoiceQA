@@ -6,6 +6,7 @@ numbers stay as written, so "20" and "twenty" count as different words.
 """
 
 import re
+from collections.abc import Sequence
 
 # A number with inner separators (1,000 or 3.5), or a run of letters and
 # digits with optional inner apostrophes.
@@ -28,6 +29,12 @@ def wer(reference: str, hypothesis: str) -> float:
     hyp = normalize_words(hypothesis)
     if not ref:
         raise ValueError("WER needs a reference with at least one word")
+    return edit_distance(ref, hyp) / len(ref)
+
+
+def edit_distance(ref: Sequence[str], hyp: Sequence[str]) -> int:
+    """Fewest word substitutions, deletions and insertions turning `ref`
+    into `hyp`. Words are compared as given, not normalised."""
     # One row of the Levenshtein table at a time: row[j] is the distance
     # between the reference words so far and the first j hypothesis words.
     row = list(range(len(hyp) + 1))
@@ -35,4 +42,4 @@ def wer(reference: str, hypothesis: str) -> float:
         diagonal, row[0] = row[0], i
         for j, h in enumerate(hyp, 1):
             diagonal, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, diagonal + (r != h))
-    return row[-1] / len(ref)
+    return row[-1]

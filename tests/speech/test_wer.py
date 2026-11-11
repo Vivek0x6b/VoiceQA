@@ -1,6 +1,6 @@
 import pytest
 
-from voiceqa.speech.wer import normalize_words, wer
+from voiceqa.speech.wer import edit_distance, normalize_words, wer
 
 
 def test_identical_text_has_no_errors():
@@ -55,6 +55,13 @@ def test_apostrophes_inside_words_are_kept():
 
 def test_hyphens_split_words():
     assert normalize_words("twenty-one") == ["twenty", "one"]
+
+
+def test_edit_distance_counts_word_edits_without_normalising():
+    assert edit_distance(["see", "you", "tonight"], ["see", "you", "to"]) == 1
+    assert edit_distance(["a", "b"], []) == 2
+    assert edit_distance([], ["a"]) == 1
+    assert edit_distance(["Hi"], ["hi"]) == 1
 
 
 def test_empty_reference_is_an_error():
