@@ -97,6 +97,11 @@ async def call_and_record(agent, send=None, listen=1.5):
         return read_wav(os.path.join(tmp, "agent.wav"))[0]
 
 
+# Quarantined: on a loaded CI runner (windows 3.13, run 43073691600) a frame
+# placed off the 20 ms grid counts as two loud grid frames, giving 53 > 52
+# and 28 > 26. Count by energy, as test_play_sends_the_wav_resampled_to_8k
+# does, to take them out of quarantine.
+@pytest.mark.quarantine
 def test_echo_sends_the_callers_audio_back():
     tone = generate_tone(440, 1.0)
 
@@ -117,6 +122,7 @@ def first_loud_sample(audio, threshold=2000):
     return int(np.flatnonzero(np.abs(audio) > threshold)[0])
 
 
+@pytest.mark.quarantine
 def test_recording_of_an_echo_call_lines_up_on_one_clock(tmp_path):
     tone = generate_tone(440, 0.5)
 

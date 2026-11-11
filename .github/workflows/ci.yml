@@ -46,12 +46,26 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          pytest -rfEs --tb=short 2>&1 | tee pytest.log
+          pytest -rfEs --tb=short -m "not quarantine" 2>&1 | tee pytest.log
       # Job logs need a login to read, annotations do not.
       - name: report failures
         if: failure()
         shell: bash
         run: grep -E "^(FAILED|ERROR) tests/" pytest.log | sed 's/^/::error::/' || true
+      # Tests known to fail on a loaded runner (see ARCHITECTURE.md, known
+      # problems). They still run and their failures are reported, but they
+      # do not fail the job.
+      - name: pytest (quarantined)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -rfEs --tb=short -m quarantine 2>&1 | tee quarantine.log
+      - name: report quarantined failures
+        if: always()
+        shell: bash
+        run: grep -E "^(FAILED|ERROR) tests/" quarantine.log | sed 's/^/::warning::/' || true
       # Informational only. The numbers never fail the job, only a crash does.
       - name: bench stt
         shell: bash

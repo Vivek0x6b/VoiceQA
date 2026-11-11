@@ -57,4 +57,5 @@ select = ["E", "F", "W", "I", "B", "UP"]
 testpaths = ["tests"]
 markers = [
     "model: runs a real speech model (needs the [stt] extra and the model in the local cache)",
+    "quarantine: known to fail on a loaded CI runner; CI runs these in a separate step that does not fail the job",
 ]
