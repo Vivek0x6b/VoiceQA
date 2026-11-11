@@ -82,6 +82,7 @@ VAD_STOPPED = "vad_stopped"
 
 
 _live_sessions = 0
+_unfreeze_at_end = True
 
 
 def _freeze_heap() -> None:
@@ -91,8 +92,11 @@ def _freeze_heap() -> None:
     objects, and a full GC pass over them in the middle of a call holds the
     GIL long enough to make the RTP sender late. The first session of
     several pays the collect, before it dials."""
-    global _live_sessions
+    global _live_sessions, _unfreeze_at_end
     if _live_sessions == 0:
+        # gc.unfreeze() is all or nothing: if the process froze objects
+        # before us, they stay frozen with ours instead of being released.
+        _unfreeze_at_end = gc.get_freeze_count() == 0
         gc.collect()
         gc.freeze()
     _live_sessions += 1
@@ -101,7 +105,7 @@ def _freeze_heap() -> None:
 def _unfreeze_heap() -> None:
     global _live_sessions
     _live_sessions -= 1
-    if _live_sessions == 0:
+    if _live_sessions == 0 and _unfreeze_at_end:
         gc.unfreeze()
 
 

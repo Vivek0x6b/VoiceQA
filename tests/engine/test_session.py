@@ -479,7 +479,9 @@ class Cycle:
 
 
 def test_heap_is_collected_and_frozen_before_dialing_and_released_after(tmp_path, monkeypatch):
-    assert gc.get_freeze_count() == 0
+    # Python 3.12 arrives here with a few hundred objects already frozen by
+    # something outside voiceqa, so counts are relative to the start.
+    before = gc.get_freeze_count()
     seen = {}
     real_place_call = session_module.place_call
 
@@ -507,10 +509,33 @@ def test_heap_is_collected_and_frozen_before_dialing_and_released_after(tmp_path
 
     asyncio.run(main())
 
-    assert seen["frozen at dial"] > 0
-    assert seen["frozen in call"] > 0
+    assert seen["frozen at dial"] > before + 1000
+    assert seen["frozen in call"] > before + 1000
     assert seen["cycle alive at dial"] is False
-    assert gc.get_freeze_count() == 0
+    assert gc.get_freeze_count() == before
+
+
+def test_an_earlier_freeze_by_the_host_survives_the_session(tmp_path):
+    """gc.unfreeze() is all or nothing, so a session must not release what
+    the process froze before it: that stays frozen along with the rest."""
+    gc.freeze()
+    own = gc.get_freeze_count()
+    assert own > 0
+    try:
+
+        async def main():
+            agent = await start_agent(tmp_path, noise(2.0))
+            try:
+                async with session_for(agent, tmp_path / "run", freeze_heap=True) as session:
+                    with pytest.raises(TimeoutError):
+                        await session.next_agent_turn(timeout=0.3)
+            finally:
+                await agent.close()
+
+        asyncio.run(main())
+        assert gc.get_freeze_count() >= own
+    finally:
+        gc.unfreeze()
 
 
 def test_library_use_leaves_the_gc_heap_alone(tmp_path, monkeypatch):
