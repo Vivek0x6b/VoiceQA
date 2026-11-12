@@ -59,6 +59,35 @@ def test_tap_say_uses_the_slots_actually_sent_after_skipped_ones():
     assert ends == [(T0, T0 + 11 * FRAME_S)]
 
 
+def test_tap_reports_the_slot_of_a_marked_frame_after_skipped_ones():
+    tap = TurnTap(Sink())
+    marks = []
+    tap.start_say(4, lambda at: None, lambda first, last: None, mark=1, on_mark=marks.append)
+    tap.sent(T0, frame(0))
+    # The sender skipped ten slots after a stall, right before frame 1.
+    tap.sent(T0 + 11 * FRAME_S, frame(0))
+    tap.sent(T0 + 12 * FRAME_S, frame(0))
+    tap.sent(T0 + 13 * FRAME_S, frame(0))
+    assert marks == [T0 + 11 * FRAME_S]
+
+
+def test_tap_stop_turns_drops_the_buffer_and_stops_feeding():
+    sink, fed = Sink(), []
+    tap = TurnTap(sink, on_agent_frame=lambda at, s: fed.append(at))
+    tap.hold_from(T0)
+    for i in range(10):
+        tap.received(T0 + i * FRAME_S, T0 + i * FRAME_S, frame(3))
+    assert tap.buffered_frames == 10
+    tap.stop_turns()
+    assert tap.buffered_frames == 0
+    for i in range(10, 20):
+        tap.received(T0 + i * FRAME_S, T0 + i * FRAME_S, frame(3))
+    assert tap.buffered_frames == 0
+    assert len(fed) == 10
+    # The recording still gets every frame.
+    assert len(sink.received_frames) == 20
+
+
 def test_tap_refuses_a_second_say_while_one_is_going_out():
     tap = TurnTap(Sink())
     tap.start_say(2, lambda at: None, lambda first, last: None)

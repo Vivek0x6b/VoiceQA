@@ -46,6 +46,7 @@ from voiceqa.speech.models import Segment, Transcript
 from voiceqa.speech.vad import (
     SPEECH_START,
     TURN_END,
+    EnergyVad,
     ThreadedTurnDetector,
     TurnDetector,
     TurnEvent,
@@ -125,14 +126,41 @@ class TurnDetectionError(RuntimeError):
 
 @dataclass(frozen=True)
 class Said:
+    """Slot times of a say. `voiced_end` is the end of its last voiced frame
+    (energy VAD over the audio before it went out), so a silence tail in a
+    WAV or TTS clip does not count; it is `end` when no frame was voiced.
+    Response latency is measured from it."""
+
     turn: str
     first_frame: float
     last_frame: float
+    voiced_end: float
 
     @property
     def end(self) -> float:
         """When the last sample went out: the last frame's slot plus 20 ms."""
         return self.last_frame + FRAME_SECONDS
+
+
+# Digital silence put in front of a say before finding its voiced frames,
+# so the energy VAD starts from a quiet line (see EnergyVad) even when the
+# clip starts with speech.
+_VOICED_LEAD_FRAMES = 10
+
+
+def last_voiced_frame(samples: np.ndarray) -> int | None:
+    """Index of the last 20 ms frame of `samples` (int16, 8 kHz) that the
+    energy VAD calls speech, or None."""
+    vad = EnergyVad()
+    silent = np.zeros(FRAME_SAMPLES, dtype=np.int16)
+    for _ in range(_VOICED_LEAD_FRAMES):
+        vad.process(silent)
+    last = None
+    for i in range(-(-len(samples) // FRAME_SAMPLES)):
+        frame = samples[i * FRAME_SAMPLES : (i + 1) * FRAME_SAMPLES]
+        if vad.process(frame) >= 0.5:
+            last = i
+    return last
 
 
 @dataclass(frozen=True)
@@ -157,6 +185,7 @@ class _Say:
     text: str | None
     first: float | None = None
     end: float | None = None
+    voiced_end: float | None = None
 
 
 @dataclass
@@ -248,6 +277,7 @@ class CallSession:
         self._says: list[_Say] = []
         self._active_say: tuple[_Say, asyncio.Future] | None = None
         self._overlaps: set[tuple[str, str]] = set()
+        self._says_in_open_turn: list[_Say] = []
 
     @property
     def ended(self) -> bool:
@@ -366,6 +396,7 @@ class CallSession:
             raise ValueError("say() needs at least one sample")
         if self._tap.saying:
             raise RuntimeError("a say is still going out")
+        voiced = last_voiced_frame(x)
         self._say_count += 1
         record = _Say(f"caller-{self._say_count}", text)
         done: asyncio.Future[Said] = self._loop.create_future()
@@ -375,22 +406,60 @@ class CallSession:
             self._rec.event(CALLER_SAY_START, at=at, turn=record.turn)
             self._overlap_at_say_start(record)
 
+        def on_voiced(at: float) -> None:
+            record.voiced_end = at + FRAME_SECONDS
+
         def on_end(first: float, last: float) -> None:
             record.end = last + FRAME_SECONDS
             self._rec.event(CALLER_SAY_END, at=record.end, turn=record.turn)
             self._active_say = None
             if not done.done():
-                done.set_result(Said(record.turn, first, last))
+                voiced_end = record.voiced_end if record.voiced_end is not None else record.end
+                done.set_result(Said(record.turn, first, last, voiced_end))
 
-        self._tap.start_say(frames, on_start, on_end)
+        self._tap.start_say(frames, on_start, on_end, mark=voiced, on_mark=on_voiced)
         self._says.append(record)
         self._active_say = (record, done)
-        self._rtp.send(x)
+        try:
+            self._rtp.send(x)
+        except BaseException:
+            self._tap.abort_say()
+            self._says.remove(record)
+            self._active_say = None
+            raise
         return await done
 
-    async def next_agent_turn(self, timeout: float) -> AgentTurn:
+    def set_end_silence_ms(self, end_silence_ms: float) -> None:
+        """Silence that ends an agent turn from now on: from the next frame
+        the detector thread processes (frames still queued included)."""
+        if self._turn_detector is None:
+            raise RuntimeError("turn detection is off (vad=None)")
+        if not end_silence_ms > 0:
+            raise ValueError(f"end_silence_ms must be positive, got {end_silence_ms}")
+        # One attribute the detector reads once per frame; a float store is
+        # atomic, so no lock is needed.
+        self._turn_detector.end_silence_ms = float(end_silence_ms)
+
+    @property
+    def t0(self) -> float:
+        """The recording's time zero on media_clock (events.json, the WAVs
+        and transcript.json count from it). Set once start() has run."""
+        if self._rec is None:
+            raise RuntimeError("the session has not started")
+        return self._rec.t0
+
+    @property
+    def agent_turn_count(self) -> int:
+        """Agent turns found so far (ended ones)."""
+        return len(self._agent_turns)
+
+    async def next_agent_turn(self, timeout: float, since: float | None = None) -> AgentTurn:
         """The next agent turn not yet returned, in order, once it has ended
         and been transcribed.
+
+        With `since` (media_clock), turns that ended at or before it are
+        dropped unseen: a late answer to an earlier prompt is not returned
+        to a later one.
 
         `timeout` limits the wait for the turn to end; TimeoutError when it
         runs out. The transcript wait after that is limited by stt_timeout
@@ -401,7 +470,11 @@ class CallSession:
         if self._turn_detector is None:
             raise RuntimeError("turn detection is off (vad=None)")
         async with asyncio.timeout(timeout):
-            while not self._ready:
+            while True:
+                while since is not None and self._ready and self._ready[0].end <= since:
+                    self._ready.popleft()
+                if self._ready:
+                    break
                 if self._vad_error is not None:
                     raise TurnDetectionError(
                         f"turn detection failed: {self._vad_error}"
@@ -445,21 +518,24 @@ class CallSession:
         self._closed = True
         try:
             try:
-                if self._call is not None:
-                    await self._call.hangup()
+                try:
+                    if self._call is not None:
+                        await self._call.hangup()
+                finally:
+                    await self._stop_media()
             finally:
-                await self._stop_media()
+                if self._watcher is not None:
+                    self._watcher.cancel()
+                try:
+                    self._close_recording()
+                finally:
+                    if self._frozen:
+                        self._frozen = False
+                        _unfreeze_heap()
         finally:
-            if self._watcher is not None:
-                self._watcher.cancel()
-            try:
-                self._close_recording()
-            finally:
-                if self._frozen:
-                    self._frozen = False
-                    _unfreeze_heap()
-        if self.answered and self._stt is not None:
-            await self._write_transcript()
+            # Written even when the hangup failed: the turns are all in.
+            if self.answered and self._stt is not None:
+                await self._write_transcript()
 
     def _stop_media(self) -> asyncio.Task:
         if self._media_stop is None:
@@ -534,6 +610,7 @@ class CallSession:
             self._open_turn = None
             self._tap.hold_from(None)
             self._rec.event(AGENT_TURN_END, at=event.at, turn=turn)
+            self._overlap_at_turn_end(turn, event.at)
             audio_start = start - STT_PAD_SECONDS
             audio = self._tap.cut(audio_start, event.at + STT_PAD_SECONDS)
             pad = round(STT_PAD_SECONDS * SAMPLE_RATE)
@@ -550,6 +627,12 @@ class CallSession:
         if self._vad_error is not None:
             return
         self._vad_error = exc
+        # No turn will end now, so a held turn would buffer agent audio for
+        # the rest of the call.
+        if self._tap is not None:
+            self._tap.stop_turns()
+        self._open_turn = None
+        self._says_in_open_turn.clear()
         if self._rec is not None:
             self._rec.event(VAD_ERROR, error=str(exc) or type(exc).__name__)
         self._wake.set()
@@ -573,8 +656,16 @@ class CallSession:
                 )
 
     def _overlap_at_say_start(self, say: _Say) -> None:
+        # An open turn may only be waiting out its end silence, the agent
+        # already quiet. Whether it overlaps is known at its turn_end.
         if self._open_turn is not None and self._open_turn[1] <= say.first:
-            self._overlap(self._open_turn[0], say, say.first, "caller")
+            self._says_in_open_turn.append(say)
+
+    def _overlap_at_turn_end(self, turn: str, end: float) -> None:
+        for say in self._says_in_open_turn:
+            if end > say.first:
+                self._overlap(turn, say, say.first, "caller")
+        self._says_in_open_turn.clear()
 
     # transcript.json
 

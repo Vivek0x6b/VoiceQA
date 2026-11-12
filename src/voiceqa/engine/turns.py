@@ -36,34 +36,47 @@ class TurnTap:
         self._frames: deque[tuple[float, np.ndarray]] = deque()
         self._newest = float("-inf")
         self._hold: float | None = None
+        self._keep = True
         self._say_left = 0
+        self._say_sent = 0
         self._say_first: float | None = None
         self._say_last: float | None = None
         self._on_say_start: Callable[[float], object] | None = None
         self._on_say_end: Callable[[float, float], object] | None = None
+        self._say_mark: int | None = None
+        self._on_say_mark: Callable[[float], object] | None = None
 
     @property
     def saying(self) -> bool:
         return self._say_left > 0
+
+    @property
+    def buffered_frames(self) -> int:
+        return len(self._frames)
 
     def start_say(
         self,
         frames: int,
         on_start: Callable[[float], object],
         on_end: Callable[[float, float], object],
+        mark: int | None = None,
+        on_mark: Callable[[float], object] | None = None,
     ) -> None:
         """Times the next `frames` sent frames, which must be the audio
         about to be queued. on_start gets the first frame's slot time,
-        on_end the first and last. Call it right before queueing the
-        audio, on the loop thread, so no other frame goes out in between.
+        on_end the first and last, on_mark the slot of frame number `mark`
+        (counting from 0). Call it right before queueing the audio, on the
+        loop thread, so no other frame goes out in between.
         """
         if self.saying:
             raise RuntimeError("a say is still going out")
         if frames <= 0:
             raise ValueError(f"a say needs at least one frame, got {frames}")
         self._say_left = frames
+        self._say_sent = 0
         self._say_first = self._say_last = None
         self._on_say_start, self._on_say_end = on_start, on_end
+        self._say_mark, self._on_say_mark = mark, on_mark
 
     def abort_say(self) -> tuple[float, float] | None:
         """Stops timing the current say. Returns the slot times of its first
@@ -73,8 +86,16 @@ class TurnTap:
             sent = (self._say_first, self._say_last)
         self._say_left = 0
         self._say_first = self._say_last = None
-        self._on_say_start = self._on_say_end = None
+        self._on_say_start = self._on_say_end = self._on_say_mark = None
+        self._say_mark = None
         return sent
+
+    def stop_turns(self) -> None:
+        """Stop feeding the detector and keeping agent audio, for good (the
+        VAD failed). Frames still go to the recorder."""
+        self._keep = False
+        self._hold = None
+        self._frames.clear()
 
     def hold_from(self, at: float | None) -> None:
         """Keep agent audio from `at` on, whatever the preroll, until
@@ -101,6 +122,9 @@ class TurnTap:
             if self._on_say_start is not None:
                 self._on_say_start(at)
         self._say_last = at
+        if self._say_sent == self._say_mark and self._on_say_mark is not None:
+            self._on_say_mark(at)
+        self._say_sent += 1
         self._say_left -= 1
         if not self._say_left:
             first, last, on_end = self._say_first, at, self._on_say_end
@@ -110,6 +134,8 @@ class TurnTap:
 
     def received(self, at: float, arrived: float, samples: np.ndarray) -> None:
         self._sink.received(at, arrived, samples)
+        if not self._keep:
+            return
         if self._on_agent_frame is not None:
             self._on_agent_frame(at, samples)
         self._frames.append((at, samples))

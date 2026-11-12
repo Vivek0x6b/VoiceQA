@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import gc
 import json
 import threading
@@ -167,6 +168,8 @@ def test_session_finds_agent_turns_and_transcribes_each_in_the_worker(tmp_path):
     assert agent_segments[0]["start"] == pytest.approx(first.start - 0.2 - t0, abs=1e-6)
     assert data["engine"] == "fake"
     assert session.result.answered
+    assert session.t0 == t0
+    assert session.agent_turn_count == 2
 
 
 def test_say_reports_slot_times_and_lands_in_events_and_transcript(tmp_path):
@@ -211,6 +214,202 @@ def test_say_reports_slot_times_and_lands_in_events_and_transcript(tmp_path):
             "turn": "caller-1",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "audio",
+    [
+        clip(silence(0.2), tone(0.6), silence(0.3)),
+        # Speech in the very first frame, and a tail of low noise.
+        clip(tone(0.6), noise(0.3)),
+    ],
+    ids=["silence-tail", "noise-tail"],
+)
+def test_said_voiced_end_is_the_end_of_the_last_voiced_frame(tmp_path, audio):
+    async def main():
+        agent = await start_agent(tmp_path)  # echo agent
+        try:
+            async with session_for(agent, tmp_path / "run") as session:
+                return await session.say(audio, text="hi")
+        finally:
+            await agent.close()
+
+    said = asyncio.run(main())
+
+    # On our own clock: the 300 ms tail does not count, to the frame.
+    assert said.voiced_end == pytest.approx(said.end - 0.3, abs=1e-6)
+
+
+def test_said_voiced_end_is_the_say_end_when_nothing_is_voiced(tmp_path):
+    async def main():
+        agent = await start_agent(tmp_path)
+        try:
+            async with session_for(agent, tmp_path / "run") as session:
+                return await session.say(silence(0.4))
+        finally:
+            await agent.close()
+
+    said = asyncio.run(main())
+
+    assert said.voiced_end == said.end
+
+
+def test_a_say_in_the_agents_end_silence_wait_is_not_an_overlap(tmp_path):
+    record_dir = tmp_path / "run"
+    # The agent's tone ends 1.3 s after the answer; its turn ends 700 ms
+    # later. We start to say at about 1.6 s, 300 ms either side of both.
+    agent_prompt = clip(silence(0.3), tone(1.0), silence(3.0))
+
+    async def main():
+        agent = await start_agent(tmp_path, agent_prompt)
+        try:
+            session = session_for(agent, record_dir)
+            async with session:
+                await asyncio.sleep(1.6)
+                said = await session.say(tone(0.4))
+                turn = await session.next_agent_turn(timeout=10)
+            return session, said, turn
+        finally:
+            await agent.close()
+
+    session, said, turn = asyncio.run(main())
+
+    # The setup really put the say inside the end-silence wait.
+    assert turn.end < said.first_frame < turn.end + 0.7
+    assert [e for e in events_of(record_dir) if e["event"] == OVERLAP] == []
+
+
+def test_next_agent_turn_since_skips_turns_that_ended_before_it(tmp_path):
+    async def main():
+        agent = await start_agent(tmp_path, TWO_TURNS)
+        try:
+            async with session_for(agent, tmp_path / "run") as session:
+                # Turn 1 is 0.4 to 1.0 s, turn 2 2.0 to 2.4 s after the answer.
+                await asyncio.sleep(1.5)
+                since = media_clock()
+                turn = await session.next_agent_turn(timeout=10, since=since)
+            return since, turn
+        finally:
+            await agent.close()
+
+    since, turn = asyncio.run(main())
+
+    assert turn.turn == "agent-2"
+    assert turn.end > since
+
+
+class VadThatBreaksLater(EnergyVad):
+    def __init__(self, frames):
+        super().__init__()
+        self.left = frames
+
+    def process(self, frame):
+        self.left -= 1
+        if self.left < 0:
+            raise RuntimeError("model broke")
+        return super().process(frame)
+
+
+def test_a_vad_error_in_a_turn_stops_keeping_agent_audio(tmp_path):
+    agent_prompt = clip(silence(0.3), tone(4.0), silence(1.0))
+
+    async def main():
+        agent = await start_agent(tmp_path, agent_prompt)
+        try:
+            # Breaks 0.8 s in, inside the agent's turn, which holds the audio.
+            session = session_for(agent, tmp_path / "run", vad=VadThatBreaksLater(40))
+            async with session:
+                with pytest.raises(TurnDetectionError):
+                    await session.next_agent_turn(timeout=10)
+                await asyncio.sleep(0.5)
+                return session._tap.buffered_frames
+        finally:
+            await agent.close()
+
+    assert asyncio.run(main()) == 0
+
+
+def test_a_say_whose_send_fails_raises_and_frees_the_next_say(tmp_path):
+    async def main():
+        agent = await start_agent(tmp_path)
+        try:
+            async with session_for(agent, tmp_path / "run") as session:
+                real_send = session._rtp.send
+
+                def broken_send(samples):
+                    raise OSError("socket gone")
+
+                session._rtp.send = broken_send
+                with pytest.raises(OSError, match="socket gone"):
+                    await asyncio.wait_for(session.say(tone(0.2)), timeout=5)
+                session._rtp.send = real_send
+                return await asyncio.wait_for(session.say(tone(0.2), text="again"), timeout=5)
+        finally:
+            await agent.close()
+
+    said = asyncio.run(main())
+
+    assert said.end > said.first_frame
+
+
+def test_close_writes_the_transcript_even_if_the_hangup_fails(tmp_path):
+    record_dir = tmp_path / "run"
+
+    async def main():
+        agent = await start_agent(tmp_path)
+        try:
+            session = session_for(agent, record_dir)
+            with pytest.raises(RuntimeError, match="bye failed"):
+                async with session:
+                    await session.say(clip(silence(0.2), tone(0.3)), text="hello")
+
+                    async def broken_hangup():
+                        raise RuntimeError("bye failed")
+
+                    session._call.hangup = broken_hangup
+            return session
+        finally:
+            await agent.close()
+
+    session = asyncio.run(main())
+
+    data = json.loads((record_dir / "transcript.json").read_text())
+    assert [s["text"] for s in data["segments"] if s["speaker"] == "caller"] == ["hello"]
+    assert session.result is not None
+
+
+# A 500 ms tone, a 900 ms pause, another 500 ms tone.
+PAUSED = clip(silence(0.4), tone(0.5), silence(0.9), tone(0.5), silence(2.0))
+
+
+@pytest.mark.parametrize("end_silence_ms, turns", [(None, 2), (1200, 1)])
+def test_set_end_silence_ms_changes_where_the_next_turn_ends(tmp_path, end_silence_ms, turns):
+    async def main():
+        agent = await start_agent(tmp_path, PAUSED)
+        try:
+            async with session_for(agent, tmp_path / "run") as session:
+                if end_silence_ms is not None:
+                    session.set_end_silence_ms(end_silence_ms)
+                found = [await session.next_agent_turn(timeout=10)]
+                with contextlib.suppress(TimeoutError):
+                    found.append(await session.next_agent_turn(timeout=1.5))
+            return found
+        finally:
+            await agent.close()
+
+    found = asyncio.run(main())
+
+    assert len(found) == turns
+    if turns == 1:
+        assert found[0].end - found[0].start == pytest.approx(1.9, abs=EXACT)
+    else:
+        assert found[0].end - found[0].start == pytest.approx(0.5, abs=EXACT)
+
+
+def test_set_end_silence_ms_refuses_zero():
+    session = CallSession("agent", "127.0.0.1", 5060, "1001", "", "unused", vad="energy")
+    with pytest.raises(ValueError):
+        session.set_end_silence_ms(0)
 
 
 class ReplyAgent(LocalAgent):
