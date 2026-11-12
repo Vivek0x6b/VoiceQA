@@ -245,6 +245,60 @@ agent listening on 127.0.0.1:5060 (script replies.yaml), Ctrl+C to stop
 
 Every say line is made before the agent starts listening, so a bad script or a TTS failure stops it at once (exit 1) with the line it was about. The turn detection uses the energy VAD by default, so it needs no extra; `--vad silero` needs the `[stt]` extra.
 
+## Run a scenario
+
+A scenario is a YAML file of steps: what the caller says, what the agent should answer, and where to go next. `voiceqa run` places the call, says each line, transcribes each agent turn with faster-whisper (needs the `[stt]` extra and a downloaded model) and checks it.
+
+```yaml
+name: table booking
+variables: {people: four}
+defaults: {timeout: 15s, end_silence_ms: 1200}
+steps:
+  - label: greet
+    expect: {any_of: ["how can I help", "how may I help"]}
+  - label: ask
+    say: "I would like to book a table for tonight."
+    expect: {contains: how many, max_latency_ms: 3000}
+  - label: people
+    say: "We are {people} people, at seven."
+    expect: {fuzzy: {text: "you are booked for {people} people", min: 0.7}}
+    complete: true
+assert: [call_connected, agent_responded, task_completed]
+```
+
+Against the scripted agent from the section above, with three SAPI say lines that match:
+
+```
+voiceqa run booking.yaml --target sip:agent@127.0.0.1:5070 --junit junit.xml
+```
+
+```
+tts           sapi, 2 line(s) ready
+scenario  table booking (booking.yaml)
+PASS    1  greet             heard "Hello, thanks for calling. How can I help you today?"
+PASS    2  ask               heard "Sure. For how many people? //"; latency 1000 ms
+PASS    3  people            heard "Great, you are booked for four people at 7 tonight."; latency 1000 ms
+assert    call_connected    pass  the call was answered
+assert    agent_responded   pass  3 agent turn(s) heard
+assert    task_completed    pass  a complete step passed
+result    PASSED, 3 of 3 steps passed
+run       runs\20261112-042434Z-table-booking
+```
+
+The run folder holds the usual recording files, transcript.json (agent turns from the live transcripts, caller lines with the text that was said) and result.json (every step with what was said and heard, matcher results, latency, attempts and the path taken, plus the call assertions). `--junit` writes one testcase per step and per assertion, for CI.
+
+How a run goes:
+
+- A step with only `expect` listens first, for a greeting. A step with `say` and `expect` says the line, then waits up to `timeout` for the agent's next turn. A step with only `say` does not wait.
+- `say` is text (spoken with `--tts`, `--voice`, `--prompts` as for `voiceqa say`) or `{wav: file.wav, text: "what it says"}`. Without `text:` the transcript and results show the file name in brackets.
+- A failed expect is said and listened to again `retries` times. Then `on_fail: goto <label>` goes elsewhere (the step shows as ROUTED and does not fail the run), and without `on_fail` the run stops as failed. `on_match: goto <label>` jumps, `goto end` stops. More than `max_steps` steps (default 50) stops a goto loop as a failure.
+- Latency is from the end of the last voiced frame of the line we said to the start of the agent's speech, so silence at the end of a WAV or TTS clip does not count.
+- `regex` is case-sensitive unless the pattern starts with `(?i)`. The other text matchers ignore case and punctuation.
+- `fuzzy` compares the expected text with every window of the same number of words in the agent's turn, so a different word split from STT ("to night" for "tonight") lowers the score. Leave some room in `min`.
+- An agent turn ends after `end_silence_ms` of silence (default 700). Agents that pause between sentences get split into two turns: in the run above, SAPI's pause after "Sure." split the reply until `end_silence_ms` was raised to 1200. It can be set per step too.
+
+`voiceqa run booking.yaml --check` only checks the file and lists every problem. `--var name=value` sets a variable. Before dialing, the extra and the model are checked, the model is loaded and every line is synthesized, so a setup problem never costs a call. Exit codes: 0 everything passed, 1 a step or assertion failed (an unanswered call included), 2 bad input or an invalid scenario, 3 could not run (TTS, model, VAD or network failure).
+
 ## Responsible use
 
 Only test voice agents you own or have permission to test. See [SECURITY.md](SECURITY.md).

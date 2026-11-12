@@ -5,7 +5,7 @@ import platform
 import re
 import shutil
 import wave
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -18,7 +18,18 @@ from voiceqa.audio.dsp import generate_tone, resample
 from voiceqa.audio.wav import write_wav
 from voiceqa.engine.calibrate import CalibrationResult, run_calibration
 from voiceqa.engine.call import CallResult, run_call
+from voiceqa.engine.session import CallSession
 from voiceqa.engine.transcribe import TRACKS, transcribe_run, write_transcript
+from voiceqa.scenario import Scenario, ScenarioError, load_scenario
+from voiceqa.scenario.report import format_summary, write_junit, write_result
+from voiceqa.scenario.result import ScenarioResult
+from voiceqa.scenario.runner import (
+    SayTtsError,
+    SayWavError,
+    load_say_audio,
+    needs_tts,
+    run_scenario,
+)
 from voiceqa.speech import model_cache
 from voiceqa.speech.bench import default_clip_dir, load_bench_clip, run_stt_bench
 from voiceqa.speech.interfaces import Speech, TextToSpeech
@@ -591,6 +602,29 @@ def _target_host_port(target: str) -> tuple[str, int] | None:
     return host, int(port) if port else DEFAULT_SIP_PORT
 
 
+def _server_address(target: str, server: str | None, name: str) -> tuple[str, int]:
+    """The SIP server to send to: --server, else the host of a full SIP URI
+    target. Bad values exit 2. `name` is how the target is shown in errors."""
+    if "@" in target and not target.startswith(("sip:", "sips:")):
+        typer.echo(
+            f"error: {name} must not contain '@' unless it is a full sip: URI "
+            f"(use {name} without '@' together with --server)",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if server is not None:
+        try:
+            return _split_host_port(server, DEFAULT_SIP_PORT)
+        except ValueError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(2) from None
+    parsed = _target_host_port(target)
+    if parsed is None:
+        typer.echo(f"error: --server is required when {name} is not a full SIP URI", err=True)
+        raise typer.Exit(2)
+    return parsed
+
+
 def _positive(value: float) -> float:
     if value <= 0:
         raise typer.BadParameter("must be greater than 0")
@@ -707,26 +741,7 @@ def call(
         except _TRANSCRIPT_ERRORS as exc:
             typer.echo(f"error: {exc}", err=True)
             raise typer.Exit(1) from None
-    if "@" in target and not target.startswith(("sip:", "sips:")):
-        typer.echo(
-            "error: TARGET must not contain '@' unless it is a full sip: URI "
-            "(use TARGET without '@' together with --server)",
-            err=True,
-        )
-        raise typer.Exit(2)
-
-    if server is not None:
-        try:
-            server_host, server_port = _split_host_port(server, DEFAULT_SIP_PORT)
-        except ValueError as exc:
-            typer.echo(f"error: {exc}", err=True)
-            raise typer.Exit(2) from None
-    else:
-        parsed = _target_host_port(target)
-        if parsed is None:
-            typer.echo("error: --server is required when TARGET is not a full SIP URI", err=True)
-            raise typer.Exit(2)
-        server_host, server_port = parsed
+    server_host, server_port = _server_address(target, server, "TARGET")
 
     if say_text is not None:
         hint = "Pass --prompts INDEX.yaml with a WAV for this text, or --play a WAV file."
@@ -830,3 +845,180 @@ def calibrate(
     _print_calibration_summary(result)
     enough_matched = result.pulses_sent > 0 and result.pulses_matched * 2 >= result.pulses_sent
     raise typer.Exit(0 if enough_matched else 1)
+
+
+# Exit codes of voiceqa run (the result's own code covers 0, 1 and 3 once
+# the call was tried).
+EXIT_BAD_INPUT = 2
+EXIT_COULD_NOT_RUN = 3
+
+
+def _could_not_run(message: str) -> typer.Exit:
+    typer.echo(f"error: {message}", err=True)
+    return typer.Exit(EXIT_COULD_NOT_RUN)
+
+
+def _parse_vars(values: list[str]) -> dict[str, str]:
+    overrides = {}
+    for value in values:
+        name, sep, text = value.partition("=")
+        if not sep or not name:
+            raise _bad_option(f"--var needs NAME=VALUE, got {value!r}")
+        overrides[name] = text
+    return overrides
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "scenario"
+
+
+def _scenario_run_dir(out: Path, name: str) -> Path:
+    """runs/<UTC time>-<slug>, with -2, -3, ... if that folder exists."""
+    base = f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}Z-{_slug(name)}"
+    path, n = out / base, 1
+    while path.exists():
+        n += 1
+        path = out / f"{base}-{n}"
+    return path
+
+
+async def _run_with_worker(
+    scenario: Scenario, session: CallSession, audio: dict, worker: SttWorker
+) -> ScenarioResult:
+    # The model loads before dialing, so a bad model never costs a call.
+    async with worker:
+        await worker.wait_ready()
+        return await run_scenario(scenario, session, audio)
+
+
+@app.command("run")
+def run_command(
+    scenario: Annotated[Path, typer.Argument(help="Scenario YAML file.")],
+    target: Annotated[
+        str | None,
+        typer.Option("--target", help="Call target: a SIP URI or a bare user part."),
+    ] = None,
+    server: Annotated[
+        str | None,
+        typer.Option(
+            help="SIP server HOST[:PORT], used as outbound proxy. Required if the target "
+            "has no host."
+        ),
+    ] = None,
+    user: Annotated[str, typer.Option(help="SIP username.")] = "voiceqa",
+    tts: TtsOption = None,
+    voice: VoiceOption = None,
+    prompts: PromptsOption = None,
+    stt_model: Annotated[
+        str | None,
+        typer.Option("--stt-model", help="faster-whisper model for the agent's turns."),
+    ] = None,
+    models_dir: ModelsDirOption = None,
+    vad: Annotated[
+        VadName,
+        typer.Option(help="VAD that finds the agent's turns. auto: silero with the \\[stt] extra."),
+    ] = VadName.auto,
+    var: Annotated[
+        list[str] | None,
+        typer.Option("--var", help="Set a scenario variable, NAME=VALUE. Repeat for more."),
+    ] = None,
+    out: Annotated[
+        Path, typer.Option("--out", help="Folder for run folders (<UTC time>-<scenario>).")
+    ] = Path("runs"),
+    junit: Annotated[
+        Path | None, typer.Option("--junit", help="Also write JUnit XML to this file.")
+    ] = None,
+    check: Annotated[
+        bool, typer.Option("--check", help="Only check the scenario; do not call.")
+    ] = False,
+) -> None:
+    """Run a scenario: call the agent, say each step's line, check each
+    reply, and write result.json next to the recording.
+
+    The SIP password is read from VOICEQA_SIP_PASSWORD, as for voiceqa call.
+    Before dialing, the \\[stt] extra and the model are checked, the model is
+    loaded and every say line is synthesized, so a setup problem never
+    costs a call.
+
+    Exit codes: 0 every step and call assertion passed, 1 one failed (an
+    unanswered call included), 2 bad input or an invalid scenario, 3 could
+    not run (TTS, model, VAD or network failure).
+    """
+    overrides = _parse_vars(var or [])
+    try:
+        loaded = load_scenario(scenario, overrides)
+    except ScenarioError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(EXIT_BAD_INPUT) from None
+    if check:
+        typer.echo(f"ok: {loaded.name}, {len(loaded.steps)} steps")
+        return
+    if target is None:
+        raise _bad_option("give the call --target (or use --check)")
+    server_host, server_port = _server_address(target, server, "--target")
+    if junit is not None and not junit.parent.is_dir():
+        raise _bad_option(f"--junit: no such folder {junit.parent}")
+    model = stt_model or DEFAULT_STT_MODEL
+    _check_model_name(model)
+
+    try:
+        worker = _stt_worker(model, models_dir)
+    except _TRANSCRIPT_ERRORS as exc:
+        raise _could_not_run(str(exc)) from None
+    synthesize = None
+    if needs_tts(loaded):
+        hint = "Pass --prompts INDEX.yaml with a WAV for each say line, or use WAV steps."
+        engine = _tts_engine(tts, prompts, hint)
+
+        def synthesize(text: str):
+            return engine.synthesize(text, voice)
+
+    try:
+        audio = load_say_audio(loaded, synthesize)
+    except SayWavError as exc:
+        raise _bad_option(str(exc)) from None
+    except SayTtsError as exc:
+        raise _could_not_run(str(exc)) from None
+    if synthesize is not None:
+        spoken = sum(s.say_text is not None and s.say_wav is None for s in loaded.steps)
+        _line("tts", f"{engine.name}, {spoken} line(s) ready")
+
+    run_dir = _scenario_run_dir(out, loaded.name)
+    try:
+        session = CallSession(
+            target,
+            server_host,
+            server_port,
+            user,
+            os.environ.get("VOICEQA_SIP_PASSWORD", ""),
+            run_dir,
+            stt=worker,
+            vad=vad.value,
+            end_silence_ms=loaded.end_silence_ms,
+            # voiceqa owns this process, so it may freeze the GC heap.
+            freeze_heap=True,
+        )
+    except (SttExtraMissingError, SileroModelError) as exc:
+        raise _could_not_run(str(exc)) from None
+    if session.vad_notice:
+        typer.echo(f"note: {session.vad_notice}", err=True)
+
+    try:
+        result = asyncio.run(_run_with_worker(loaded, session, audio, worker))
+    except SttWorkerError as exc:
+        raise _could_not_run(str(exc)) from None
+    except KeyboardInterrupt:
+        typer.echo("run interrupted", err=True)
+        if run_dir.exists():
+            _line("recording", str(run_dir))
+        raise typer.Exit(EXIT_COULD_NOT_RUN) from None
+
+    if run_dir.exists():
+        write_result(run_dir, result)
+    typer.echo(format_summary(result))
+    if junit is not None:
+        try:
+            write_junit(junit, [result])
+        except OSError as exc:
+            raise _could_not_run(f"cannot write {junit}: {exc}") from None
+    raise typer.Exit(result.exit_code)
