@@ -93,6 +93,12 @@ def _one_or_more(value: Any) -> Any:
     return [value] if isinstance(value, str) else value
 
 
+def _a_list(value: Any) -> Any:
+    if isinstance(value, str):
+        raise ValueError("must be a list of phrases")
+    return value
+
+
 def _not_empty_list(value: list[str]) -> list[str]:
     if not value:
         raise ValueError("needs at least one phrase")
@@ -134,7 +140,9 @@ class FuzzyFile(_File):
 
 class ExpectFile(_File):
     contains: Phrases = []
-    any_of: Annotated[list[StrictStr], AfterValidator(_not_empty_list)] | None = None
+    any_of: (
+        Annotated[list[StrictStr], BeforeValidator(_a_list), AfterValidator(_not_empty_list)] | None
+    ) = None
     not_contains: Phrases = []
     regex: StrictStr | None = None
     fuzzy: FuzzyFile | None = None
@@ -144,6 +152,8 @@ class ExpectFile(_File):
 
 class SayWavFile(_File):
     wav: Annotated[StrictStr, AfterValidator(_not_blank)]
+    # What the WAV says, for the transcript and the results.
+    text: Annotated[StrictStr, AfterValidator(_not_blank)] | None = None
 
 
 # Tags of the say union. They show up in pydantic error locations and the
@@ -175,6 +185,7 @@ class StepFile(_File):
     say: Say | None = None
     expect: ExpectFile | None = None
     retries: Annotated[StrictInt, AfterValidator(_non_negative)] | None = None
+    end_silence_ms: Annotated[Number, AfterValidator(_positive)] | None = None
     complete: StrictBool = False
     on_match: Goto | None = None
     on_fail: Goto | None = None
@@ -220,12 +231,15 @@ class Step(_Loaded):
     """One step. `index` counts from 1. `label` is the label from the file,
     or `step-<index>` when it has none.
 
-    `say_text` is the line to say with variables filled in, `say_wav` the
-    absolute path of the WAV to play; at most one is set. `timeout` (seconds)
-    is the step's wait for the agent's turn, `retries` how many more times to
-    say the line and listen again after a failed expect. `on_match` and
-    `on_fail` are a target label, `end`, or None: on_match None goes on to the
-    next step, on_fail None stops the run as failed."""
+    `say_wav` is the absolute path of a WAV to play. `say_text` is the line
+    with variables filled in: the text to speak when there is no WAV, else
+    the WAV's optional `text:`. `caller_text` is what goes in the transcript
+    and the results. `timeout` (seconds) is the step's wait for the agent's
+    turn, `retries` how many more times to say the line and listen again
+    after a failed expect, `end_silence_ms` the silence that ends the
+    agent's turn for this step. `on_match` and `on_fail` are a target label,
+    `end`, or None: on_match None goes on to the next step, on_fail None
+    stops the run as failed."""
 
     index: int
     label: str
@@ -234,9 +248,20 @@ class Step(_Loaded):
     expect: Expect | None = None
     timeout: float
     retries: int
+    end_silence_ms: float = DEFAULT_END_SILENCE_MS
     complete: bool = False
     on_match: str | None = None
     on_fail: str | None = None
+
+    @property
+    def caller_text(self) -> str | None:
+        """The said text, or the WAV's file name in brackets when a WAV has
+        no `text:`. None for a step that says nothing."""
+        if self.say_text is not None:
+            return self.say_text
+        if self.say_wav is not None:
+            return f"[{self.say_wav.name}]"
+        return None
 
 
 class Scenario(_Loaded):

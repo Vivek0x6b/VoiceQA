@@ -42,7 +42,7 @@ CASES = [
           - {label: other, say: hi}
           - {label: ask, say: again}
         """,
-        "step 3 (ask): duplicate label, also step 1",
+        "step 3 (ask): duplicate label 'ask', also step 1",
     ),
     (
         "duplicate-of-a-default-label",
@@ -51,7 +51,58 @@ CASES = [
           - {say: hi}
           - {label: step-1, say: again}
         """,
-        "step 2 (step-1): duplicate label, also step 1",
+        "step 2 (step-1): duplicate label 'step-1', also step 1",
+    ),
+    (
+        "default-label-taken-by-an-earlier-step",
+        """
+        steps:
+          - {label: step-2, say: hi}
+          - {say: again}
+        """,
+        "step 2: duplicate label 'step-2', also step 1",
+    ),
+    (
+        "say-empty-after-variables",
+        """
+        variables: {name: ""}
+        steps:
+          - {label: a, say: "{name}"}
+        """,
+        "step 1 (a): say: is empty after filling in variables",
+    ),
+    (
+        "wav-text-empty-after-variables",
+        """
+        variables: {name: " "}
+        steps:
+          - {label: a, say: {wav: none.wav, text: "{name}"}}
+        """,
+        "step 1 (a): say.text: is empty after filling in variables",
+    ),
+    (
+        "wav-text-blank",
+        """
+        steps:
+          - {label: a, say: {wav: none.wav, text: "  "}}
+        """,
+        "step 1 (a): say.text: must not be empty",
+    ),
+    (
+        "any-of-a-single-string",
+        """
+        steps:
+          - {label: a, expect: {any_of: hello}}
+        """,
+        "step 1 (a): expect.any_of: must be a list of phrases",
+    ),
+    (
+        "step-end-silence-zero",
+        """
+        steps:
+          - {label: a, say: hi, end_silence_ms: 0}
+        """,
+        "step 1 (a): end_silence_ms: must be above 0, got 0",
     ),
     (
         "reserved-label-end",

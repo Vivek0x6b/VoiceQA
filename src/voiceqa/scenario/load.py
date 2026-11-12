@@ -138,7 +138,7 @@ def _build(
         if label == END:
             problems.append(f"{where}: label {END!r} is reserved")
         elif label in first_index:
-            problems.append(f"{where}: duplicate label, also step {first_index[label]}")
+            problems.append(f"{where}: duplicate label {label!r}, also step {first_index[label]}")
         else:
             first_index[label] = i
 
@@ -198,13 +198,23 @@ def _build_step(
         if target is not None and target != END and target not in labels:
             report(field, f"no step labelled {target!r}")
 
+    def fill_say(field: str, text: str) -> str:
+        filled = fill(field, text)
+        if filled is None:
+            return text
+        if not filled.strip():
+            report(field, "is empty after filling in variables")
+        return filled
+
     say_text = say_wav = None
     if isinstance(item.say, SayWavFile):
         say_wav = (folder / item.say.wav).resolve()
         if not say_wav.is_file():
             report("say.wav", f"no such WAV file: {say_wav}")
+        if item.say.text is not None:
+            say_text = fill_say("say.text", item.say.text)
     elif item.say is not None:
-        say_text = fill("say", item.say) or item.say
+        say_text = fill_say("say", item.say)
 
     expect = None
     if item.expect is not None:
@@ -221,6 +231,9 @@ def _build_step(
         expect=expect,
         timeout=timeout,
         retries=retries if expect is not None else 0,
+        end_silence_ms=(
+            item.end_silence_ms if item.end_silence_ms is not None else file.defaults.end_silence_ms
+        ),
         complete=item.complete,
         on_match=item.on_match,
         on_fail=item.on_fail,

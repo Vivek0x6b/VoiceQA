@@ -132,6 +132,56 @@ def test_step_values_override_the_defaults(write_scenario):
     assert s.max_steps == 7
 
 
+def test_step_end_silence_ms_falls_back_to_the_default(write_scenario):
+    s = load_scenario(
+        write_scenario(
+            """
+            name: pauses
+            defaults: {end_silence_ms: 900}
+            steps:
+              - {label: a, say: hi, end_silence_ms: 1200}
+              - {label: b, say: hi}
+            """
+        )
+    )
+    a, b = s.steps
+    assert (a.end_silence_ms, b.end_silence_ms) == (1200, 900)
+
+
+def test_wav_say_takes_optional_text_with_variables(write_scenario, silent_wav, tmp_path):
+    silent_wav(tmp_path / "prompts" / "name.wav")
+    s = load_scenario(
+        write_scenario(
+            """
+            name: wav text
+            variables: {name: Alex}
+            steps:
+              - say: {wav: prompts/name.wav, text: "My name is {name}."}
+              - say: {wav: prompts/name.wav}
+            """
+        )
+    )
+    with_text, without = s.steps
+    assert with_text.say_text == "My name is Alex."
+    assert with_text.caller_text == "My name is Alex."
+    assert without.say_text is None
+    assert without.caller_text == "[name.wav]"
+
+
+def test_caller_text_of_a_text_say_and_of_an_expect_only_step(write_scenario):
+    s = load_scenario(
+        write_scenario(
+            """
+            name: texts
+            steps:
+              - expect: {contains: hello}
+              - say: hi there
+            """
+        )
+    )
+    assert [step.caller_text for step in s.steps] == [None, "hi there"]
+
+
 def test_contains_and_not_contains_take_a_list(write_scenario):
     s = load_scenario(
         write_scenario(
