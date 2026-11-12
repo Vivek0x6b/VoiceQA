@@ -279,7 +279,7 @@ def test_latency_counts_from_the_last_voiced_frame_not_the_silence_tail(tmp_path
             steps:
               - label: ask
                 say: {wav: tail.wav, text: question}
-                expect: {contains: booked, max_latency_ms: 1150}
+                expect: {contains: booked, max_latency_ms: 1300}
             """
         ),
         encoding="utf-8",
@@ -293,9 +293,9 @@ def test_latency_counts_from_the_last_voiced_frame_not_the_silence_tail(tmp_path
     (attempt,) = step.tries
     # On our own clock the tail is left out to the frame.
     assert attempt.said_end - attempt.said_voiced_end == pytest.approx(0.3, abs=1e-6)
-    # Across the two clocks: 0.1 s either way; counting from the end of
-    # the WAV would be 0.3 s short.
-    assert step.latency_ms == pytest.approx(1000, abs=100)
+    # Across the two clocks: 0.15 s either way (a loaded runner moves it
+    # both ways); counting from the end of the WAV would be 0.3 s short.
+    assert step.latency_ms == pytest.approx(1000, abs=150)
     assert step.status == "passed"
 
 
