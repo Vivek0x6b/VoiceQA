@@ -3,6 +3,7 @@ and JUnit, with the scripted agent on a loop of its own in this process
 and a stand-in STT worker (scenario_support.FakeWorker)."""
 
 import json
+import re
 import textwrap
 import xml.etree.ElementTree as ET
 
@@ -307,6 +308,9 @@ def test_a_junit_path_in_a_missing_folder_exits_2_before_dialing(tmp_path, worke
 def test_run_help_lists_its_options():
     result = runner.invoke(app, ["run", "--help"])
     assert result.exit_code == 0
+    # Rich styles the help when it thinks colour is wanted (on CI, for one),
+    # and puts a style change between the two dashes of an option.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     for option in (
         "--target",
         "--server",
@@ -322,4 +326,4 @@ def test_run_help_lists_its_options():
         "--junit",
         "--check",
     ):
-        assert option in result.output
+        assert option in plain
