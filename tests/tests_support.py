@@ -1,7 +1,8 @@
 """Helpers shared by tests: the pytest process's child processes, a check
-that a test left nothing running, and a one-line description of the
-machine's state for failure messages."""
+that a test left nothing running, a one-line description of the machine's
+state for failure messages, and a SIP endpoint that rejects every call."""
 
+import asyncio
 import contextlib
 import gc
 import multiprocessing
@@ -11,6 +12,8 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+
+from voiceqa.telephony.sip.message import build_response, new_tag, parse_message
 
 # Time for children and threads that are already stopping to be reaped.
 LEAK_GRACE_SECONDS = 5.0
@@ -180,3 +183,37 @@ def machine_state() -> str:
         f"load average {load_text}; {len(children)} child processes {children}; "
         f"{len(threads)} threads {threads}"
     )
+
+
+class _RejectingUas(asyncio.DatagramProtocol):
+    """Answers every INVITE with 100 Trying then a final rejection. Kept small
+    on purpose: just enough SIP to make place_call raise SipStatusError."""
+
+    def __init__(self, status=486, reason="Busy Here"):
+        self.status = status
+        self.reason = reason
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        req = parse_message(data)
+        if req.method != "INVITE":
+            return
+        for status, reason in ((100, "Trying"), (self.status, self.reason)):
+            resp = build_response(req, status, reason)
+            if status > 100:
+                to = req.headers.get("To") or ""
+                resp.headers.set("To", f"{to};tag={new_tag()}")
+            self.transport.sendto(resp.to_bytes(), addr)
+
+    def error_received(self, exc):
+        pass
+
+
+async def start_rejecting_uas(**kw):
+    loop = asyncio.get_running_loop()
+    _, proto = await loop.create_datagram_endpoint(
+        lambda: _RejectingUas(**kw), local_addr=("127.0.0.1", 0)
+    )
+    return proto
