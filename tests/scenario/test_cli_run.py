@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from scenario_support import (
     CALLER_HZ,
+    FakeCallSession,
     FakeWorker,
     agent_config,
     agent_in_thread,
@@ -242,6 +243,67 @@ def test_a_failing_run_exits_1_with_the_failure_in_console_and_junit(tmp_path, w
     failure = ET.parse(junit).getroot().find("testsuite/testcase[@name='step 2 book']/failure")
     assert failure.get("message") == 'contains: did not hear "cancelled"'
     assert f'heard: "{BOOKED}"' in failure.text
+
+
+def test_a_failing_run_with_a_fake_session_exits_1(tmp_path, worker, monkeypatch):
+    """The deterministic must-fail check for the gating CI lane: no sockets,
+    no threads, a fake clock. The real end-to-end one is a realtime test."""
+    path = write_scenario(tmp_path / "s", FAILING)
+    out = tmp_path / "runs"
+    junit = tmp_path / "junit.xml"
+    made = []
+
+    def fake_session(*args, **kwargs):
+        # The greeting comes 0.2 s after the answer; the reply to the booking
+        # line 0.4 s after its last frame, so the latency must come out as 400.
+        session = FakeCallSession(*args, replies=[(GREETING, 0.2), (BOOKED, 0.4)], **kwargs)
+        made.append(session)
+        return session
+
+    monkeypatch.setattr(cli, "CallSession", fake_session)
+    result = invoke(
+        [path, "--target", "sip:agent@127.0.0.1:5999", "--out", out]
+        + ["--junit", junit, "--vad", "energy"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert 'FAIL    2  book              contains: did not hear "cancelled"' in result.output
+    assert "result    FAILED, 1 of 2 steps passed" in result.output
+    (session,) = made
+    assert session.kwargs["freeze_heap"] is True
+    assert session.replies == []
+
+    data = json.loads((only_run_dir(out) / "result.json").read_text(encoding="utf-8"))
+    assert data["status"] == "failed"
+    assert data["exit_code"] == 1
+    assert [s["status"] for s in data["steps"]] == ["passed", "failed"]
+    greet, book = data["steps"]
+    assert greet["heard"] == GREETING
+    assert book["heard"] == BOOKED
+    assert book["reason"] == 'contains: did not hear "cancelled"'
+    assert book["latency_ms"] == pytest.approx(400.0, abs=1e-6)
+    # Times are relative to the recording's zero (T0 on the fake clock), not
+    # to 0: the greeting started 0.2 s in, the booking line 1.0 s after the
+    # greeting's end, so at 1.2 s; caller.wav is 0.7 s (35 frames).
+    (attempt,) = book["tries"]
+    assert greet["tries"][0]["agent_turn"]["start"] == pytest.approx(0.2, abs=1e-6)
+    assert attempt["said_at"] == pytest.approx(1.2, abs=1e-6)
+    assert attempt["said_end"] == pytest.approx(1.9, abs=1e-6)
+    assert data["assertions"] == [
+        {"name": "call_connected", "passed": True, "reason": "the call was answered"},
+        {"name": "agent_responded", "passed": True, "reason": "2 agent turn(s) heard"},
+        {"name": "task_completed", "passed": False, "reason": "no step with complete: true passed"},
+    ]
+
+    suite = ET.parse(junit).getroot().find("testsuite")
+    assert suite.get("failures") == "2"
+    failure = suite.find("testcase[@name='step 2 book']/failure")
+    assert failure.get("message") == 'contains: did not hear "cancelled"'
+    assert f'heard: "{BOOKED}"' in failure.text
+    assert suite.find("testcase[@name='assert task_completed']/failure") is not None
+
+    (row,) = history.list_runs()
+    assert (row.status, row.exit_code, row.steps_passed, row.steps_total) == ("failed", 1, 1, 2)
 
 
 def test_an_unanswered_call_exits_1_and_still_writes_result_json(tmp_path, worker, monkeypatch):

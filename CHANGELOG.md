@@ -84,6 +84,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - `voiceqa bench stt` builds its engine through `create_stt`, the default STT model name (base.en) is defined once, and the "needs the [stt] extra" message is built in one place. No change in behaviour or messages.
 - The plugin timeout test takes 4 s instead of 8 s.
+- A deterministic must-fail scenario test in the gating CI lane: `voiceqa run` against a fake call session (no sockets, no threads, a fake clock) whose reply does not match, checked through the exit code, result.json, the JUnit file and the run history. The real end-to-end one stays in the realtime lane.
 
 - CI is split in two jobs. Tests that depend on wall-clock timing (live calls over loopback sockets, latency and jitter bounds, the VAD on live audio, the OS TTS engines, subprocess runs) carry the `realtime` pytest marker and run in a `realtime` job with two reruns (pytest-rerunfailures, dev extra only); a failure there is a warning in the run summary. The `test` job runs everything else and is the one that must be green. The pre-commit hook still runs the whole suite.
 - `RtpSession` no longer keeps the received audio in memory, and `recording()` is gone. Received frames are placed by RTP timestamp on the local clock, and a short burst of late packets no longer shifts the rest of the call.

@@ -6,13 +6,15 @@ import asyncio
 import contextlib
 import threading
 from collections.abc import Iterator, Mapping
+from pathlib import Path
 
 import numpy as np
 import yaml
 
 from voiceqa.audio.dsp import generate_tone
 from voiceqa.audio.wav import write_wav
-from voiceqa.engine.session import CallSession
+from voiceqa.engine.call import CallResult
+from voiceqa.engine.session import AgentTurn, CallSession, Said
 from voiceqa.speech.models import Segment, Transcript
 from voiceqa.telephony.local.agent import AgentConfig, LocalAgent
 from voiceqa.telephony.local.script import read_script
@@ -141,3 +143,91 @@ def agent_in_thread(config: AgentConfig) -> Iterator[int]:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(10)
         loop.close()
+
+
+class FakeCallSession:
+    """A CallSession stand-in for the runner with no sockets and no threads,
+    on a fake clock: the agent's replies are scripted as (text, delay)
+    pairs, each reply starting `delay` seconds after the caller's last
+    frame (or after the answer, for a reply to nothing). Every reply lasts
+    REPLY_SECONDS. Takes CallSession's constructor arguments, so it can
+    stand in for `cli.CallSession` through a lambda that adds `replies`.
+
+    The clock starts at T0, not 0, so a time written relative to the
+    wrong zero shows up in the results."""
+
+    T0 = 10.0
+    REPLY_SECONDS = 1.0
+
+    def __init__(
+        self,
+        target,
+        server_host,
+        server_port,
+        username,
+        password,
+        record_dir,
+        *,
+        replies,
+        stt=None,
+        vad="auto",
+        end_silence_ms=700,
+        freeze_heap=False,
+        **ignored,
+    ):
+        self.record_dir = Path(record_dir)
+        self.replies = list(replies)
+        self.kwargs = dict(stt=stt, vad=vad, end_silence_ms=end_silence_ms, freeze_heap=freeze_heap)
+        self.vad_notice = None
+        self.answered = False
+        self.status = None
+        self.reason = None
+        self.result = None
+        self.end_silence_ms = [end_silence_ms]
+        self.t0 = self.T0
+        self._clock = self.T0
+        self._says = 0
+        self.agent_turn_count = 0
+
+    async def start(self):
+        self.record_dir.mkdir(parents=True, exist_ok=True)
+        self.answered, self.status, self.reason = True, 200, "OK"
+
+    def set_end_silence_ms(self, end_silence_ms):
+        if not end_silence_ms > 0:
+            raise ValueError(f"end_silence_ms must be positive, got {end_silence_ms}")
+        self.end_silence_ms.append(end_silence_ms)
+
+    async def say(self, samples, text=None):
+        frames = -(-len(samples) // round(FRAME_S * SAMPLE_RATE))
+        first = self._clock
+        last = first + (frames - 1) * FRAME_S
+        self._clock = last + FRAME_S
+        self._says += 1
+        return Said(f"caller-{self._says}", first, last, self._clock)
+
+    async def next_agent_turn(self, timeout, since=None):
+        if not self.replies:
+            raise TimeoutError
+        text, delay = self.replies.pop(0)
+        start = self._clock + delay
+        end = start + self.REPLY_SECONDS
+        self._clock = end
+        self.agent_turn_count += 1
+        segment = Segment(start=start - self.t0, end=end - self.t0, text=text, speaker="agent")
+        transcript = Transcript(segments=[segment], engine="fake", model="fake", language="en")
+        return AgentTurn(
+            f"agent-{self.agent_turn_count}", start, end, np.zeros(0, dtype=np.int16), transcript
+        )
+
+    async def close(self):
+        self.result = CallResult(
+            answered=self.answered,
+            status=self.status,
+            reason=self.reason,
+            duration=self._clock - self.t0,
+            frames_sent=0,
+            frames_received=0,
+            first_audio_latency=None,
+            record_dir=self.record_dir,
+        )
