@@ -75,6 +75,7 @@ def plugin_dir(tmp_path, monkeypatch):
     return folder
 
 
+@pytest.mark.realtime
 def test_plugin_success_returns_its_wav_as_speech(plugin_dir):
     install_plugin(plugin_dir, "tone", "ok")
     tts = PluginTts(plugin="tone")
@@ -87,6 +88,7 @@ def test_plugin_success_returns_its_wav_as_speech(plugin_dir):
     assert np.abs(speech.samples).max() > 5000
 
 
+@pytest.mark.realtime
 def test_plugin_gets_text_and_voice_as_json_on_stdin(plugin_dir, monkeypatch, tmp_path):
     install_plugin(plugin_dir, "tone", "ok")
     log = tmp_path / "request.json"
@@ -101,6 +103,7 @@ def test_plugin_gets_text_and_voice_as_json_on_stdin(plugin_dir, monkeypatch, tm
     assert data["args"][1].endswith(".wav")
 
 
+@pytest.mark.realtime
 def test_plugin_failure_shows_exit_code_and_stderr(plugin_dir):
     install_plugin(plugin_dir, "broken", "fail")
     with pytest.raises(TtsError) as exc_info:
@@ -111,6 +114,7 @@ def test_plugin_failure_shows_exit_code_and_stderr(plugin_dir):
     assert "no such voice: nobody" in message
 
 
+@pytest.mark.realtime
 def test_plugin_timeout_kills_it_and_says_so(plugin_dir, tmp_path, monkeypatch):
     install_plugin(plugin_dir, "slow", "slow")
     survived = tmp_path / "survived"
@@ -125,12 +129,14 @@ def test_plugin_timeout_kills_it_and_says_so(plugin_dir, tmp_path, monkeypatch):
     assert not survived.exists()
 
 
+@pytest.mark.realtime
 def test_plugin_that_writes_no_wav_is_an_error(plugin_dir):
     install_plugin(plugin_dir, "lazy", "silent-exit")
     with pytest.raises(TtsError, match="without writing"):
         PluginTts(plugin="lazy").synthesize("hello")
 
 
+@pytest.mark.realtime
 def test_missing_plugin_names_the_executable(plugin_dir):
     with pytest.raises(TtsError, match="voiceqa-tts-nothere"):
         PluginTts(plugin="nothere").synthesize("hello")

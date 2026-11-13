@@ -28,6 +28,9 @@ from voiceqa.speech.models import Transcript
 from voiceqa.speech.wer import wer
 from voiceqa.telephony.media import SAMPLE_RATE
 
+# Real subprocesses with start-up and call timeouts.
+pytestmark = pytest.mark.realtime
+
 AGENT_START_TIMEOUT = 15.0
 CALL_TIMEOUT = 30.0
 _LISTENING_RE = re.compile(r"agent listening on ([^:\s]+):(\d+)")

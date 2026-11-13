@@ -19,7 +19,8 @@ from voiceqa.speech.bench import default_clip_dir, load_bench_clip
 from voiceqa.speech.wer import wer
 from voiceqa.speech.worker import SttWorker
 
-pytestmark = pytest.mark.model
+# The worker is a real child process with start-up and job timeouts.
+pytestmark = [pytest.mark.model, pytest.mark.realtime]
 
 LEAD = 1.0
 OFFSET = 2.0

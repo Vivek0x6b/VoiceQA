@@ -73,6 +73,7 @@ class Recorder:
                 await asyncio.sleep(0.002)
 
 
+@pytest.mark.realtime
 def test_invite_retransmits_with_doubling_until_provisional():
     async def main():
         rec = Recorder()
@@ -92,6 +93,7 @@ def test_invite_retransmits_with_doubling_until_provisional():
     assert [r.status for r in tx.provisional] == [100]
 
 
+@pytest.mark.realtime
 def test_invite_timer_b_times_out():
     async def main():
         rec = Recorder()
@@ -109,6 +111,7 @@ def test_invite_timer_b_times_out():
     assert len(rec.sent) >= 5
 
 
+@pytest.mark.realtime
 def test_invite_failure_is_acked_on_same_branch():
     async def main():
         rec = Recorder()
@@ -142,6 +145,7 @@ def test_ack_for_failure_fields():
     assert ack.body == b""
 
 
+@pytest.mark.realtime
 def test_retransmitted_2xx_goes_to_callback_and_lingers():
     async def main():
         rec = Recorder()
@@ -167,6 +171,7 @@ def test_retransmitted_2xx_goes_to_callback_and_lingers():
     assert terminated == [True]
 
 
+@pytest.mark.realtime
 def test_non_invite_retransmits_capped_at_t2():
     async def main():
         rec = Recorder()
@@ -190,6 +195,7 @@ def test_non_invite_retransmits_capped_at_t2():
     assert all(g < 0.28 for g in gaps[3:])
 
 
+@pytest.mark.realtime
 def test_non_invite_uses_t2_after_provisional():
     async def main():
         rec = Recorder()
@@ -204,6 +210,7 @@ def test_non_invite_uses_t2_after_provisional():
     assert gaps[1] >= 0.1 - SLACK
 
 
+@pytest.mark.realtime
 def test_non_invite_timer_f_times_out():
     async def main():
         tx = NonInviteClientTransaction(bye(), Recorder(), t1=0.005, t2=0.02)
@@ -215,6 +222,7 @@ def test_non_invite_timer_f_times_out():
     asyncio.run(main())
 
 
+@pytest.mark.realtime
 def test_udp_transport_round_trip_and_garbage_dropped():
     async def main():
         got = []

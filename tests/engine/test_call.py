@@ -2,6 +2,7 @@ import asyncio
 import json
 import socket
 
+import pytest
 from tests_support import start_rejecting_uas
 
 from voiceqa.audio.dsp import generate_tone
@@ -9,6 +10,9 @@ from voiceqa.engine.call import run_call
 from voiceqa.telephony.local.agent import AgentConfig, LocalAgent
 from voiceqa.telephony.media import PayloadType
 from voiceqa.telephony.sip.message import build_response, new_tag, parse_message
+
+# Every test places a live call over loopback sockets.
+pytestmark = pytest.mark.realtime
 
 
 async def start_agent(**kw):

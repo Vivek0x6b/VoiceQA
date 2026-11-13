@@ -102,6 +102,7 @@ async def call_and_record(agent, send=None, listen=1.5):
 # and 28 > 26. Count by energy, as test_play_sends_the_wav_resampled_to_8k
 # does, to take them out of quarantine.
 @pytest.mark.quarantine
+@pytest.mark.realtime
 def test_echo_sends_the_callers_audio_back():
     tone = generate_tone(440, 1.0)
 
@@ -123,6 +124,7 @@ def first_loud_sample(audio, threshold=2000):
 
 
 @pytest.mark.quarantine
+@pytest.mark.realtime
 def test_recording_of_an_echo_call_lines_up_on_one_clock(tmp_path):
     tone = generate_tone(440, 0.5)
 
@@ -181,6 +183,7 @@ class RawSip(asyncio.DatagramProtocol):
         return [m for m in self.received if isinstance(m, Response) and m.status >= 200]
 
 
+@pytest.mark.realtime
 def test_reinvite_mid_call_does_not_interrupt_the_echo(tmp_path):
     tone = generate_tone(440, 2.0)
     seen = {}
@@ -239,6 +242,7 @@ async def wait_for(cond, timeout=5.0):
             await asyncio.sleep(0.005)
 
 
+@pytest.mark.realtime
 def test_echo_works_for_an_invite_without_an_sdp_offer():
     tone = generate_tone(440, 0.5)
 
@@ -294,6 +298,7 @@ def test_echo_works_for_an_invite_without_an_sdp_offer():
     assert asyncio.run(main()) == 200
 
 
+@pytest.mark.realtime
 def test_cancel_during_the_answer_delay_rejects_the_call_with_487():
     async def main():
         agent = await LocalAgent.start(agent_config(answer_delay=5.0))
@@ -336,6 +341,7 @@ def test_cancel_during_the_answer_delay_rejects_the_call_with_487():
     assert events[-1] == ("call_rejected", {"status": 487, "reason": "Request Terminated"})
 
 
+@pytest.mark.realtime
 def test_play_sends_the_wav_resampled_to_8k(tmp_path):
     wav = tmp_path / "prompt.wav"
     tone = generate_tone(600, 0.5, sample_rate=16000)
@@ -355,6 +361,7 @@ def test_play_sends_the_wav_resampled_to_8k(tmp_path):
     assert abs(dominant_hz(got) - 600) < 5
 
 
+@pytest.mark.realtime
 def test_hangup_after_ends_the_call_from_the_agent():
     async def main():
         agent = await LocalAgent.start(agent_config(hangup_after=0.3))
@@ -403,6 +410,7 @@ def frames(n):
         yield pool[i % len(pool)]
 
 
+@pytest.mark.realtime
 def test_echo_buffer_work_per_frame_stays_flat_over_ten_minutes():
     buf = EchoBuffer()
     sent = []

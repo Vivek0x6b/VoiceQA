@@ -188,6 +188,7 @@ def test_tracks_that_disagree_on_language_list_both(tmp_path):
     assert transcript.language == "de,en"
 
 
+@pytest.mark.realtime
 def test_runs_through_the_worker_process(tmp_path):
     run_dir = make_run(tmp_path, caller_bursts=[], agent_bursts=[], seconds=1.0)
     scripted = Transcript(

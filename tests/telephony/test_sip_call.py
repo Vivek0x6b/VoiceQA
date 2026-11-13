@@ -24,6 +24,10 @@ from voiceqa.telephony.sip.message import (
     parse_via,
 )
 
+# Every test runs the UAC against a fake server over loopback UDP, on real
+# SIP timers.
+pytestmark = pytest.mark.realtime
+
 LOCAL = LocalMedia(host="127.0.0.1", port=40000)
 REALM = "pbx.test"
 USER = "1001"

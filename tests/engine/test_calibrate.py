@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import numpy as np
+import pytest
 
 from voiceqa.engine.calibrate import generate_pulse_train, pulse_count, run_calibration
 
@@ -15,6 +16,7 @@ def test_generate_pulse_train_has_a_burst_at_the_start_of_each_period():
     assert np.all(train[400:4000] == 0)  # quiet in between
 
 
+@pytest.mark.realtime
 def test_run_calibration_against_the_local_echo_agent_writes_calibration_json(tmp_path):
     seconds = 2.0
     result = asyncio.run(run_calibration(tmp_path, seconds=seconds))

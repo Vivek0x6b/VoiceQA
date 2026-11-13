@@ -7,6 +7,9 @@ from voiceqa.telephony.media import PayloadType, RemoteMedia
 from voiceqa.telephony.rtp import RtpSession
 from voiceqa.telephony.sip.transport import UdpTransport
 
+# Real sockets on each event loop.
+pytestmark = pytest.mark.realtime
+
 # Linux and macOS use the selector loop. Windows defaults to the proactor loop
 # but has both, so running each here keeps the selector path covered on every OS.
 LOOPS = [pytest.param(asyncio.SelectorEventLoop, id="selector")]

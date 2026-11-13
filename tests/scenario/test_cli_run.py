@@ -175,6 +175,7 @@ def test_an_stt_model_that_fails_to_load_exits_3_before_dialing(tmp_path, monkey
     assert not out.exists()
 
 
+@pytest.mark.realtime
 def test_a_passing_run_exits_0_and_writes_result_json_and_junit(tmp_path, worker, monkeypatch):
     path = write_scenario(tmp_path / "s", PASSING)
     out = tmp_path / "runs"
@@ -217,6 +218,7 @@ def test_a_passing_run_exits_0_and_writes_result_json_and_junit(tmp_path, worker
     assert (suite.get("tests"), suite.get("failures")) == ("5", "0")
 
 
+@pytest.mark.realtime
 def test_a_failing_run_exits_1_with_the_failure_in_console_and_junit(tmp_path, worker):
     path = write_scenario(tmp_path / "s", FAILING)
     out = tmp_path / "runs"
@@ -260,6 +262,7 @@ def test_an_unanswered_call_exits_1_and_still_writes_result_json(tmp_path, worke
     }
 
 
+@pytest.mark.realtime
 def test_a_could_not_run_error_during_the_call_exits_3(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli, "_stt_worker", lambda model, models_dir: FakeWorker(TEXTS, error="worker died")

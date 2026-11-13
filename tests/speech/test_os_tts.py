@@ -40,6 +40,7 @@ def assert_sounds_like_speech(speech, text):
 
 
 @windows_only
+@pytest.mark.realtime
 def test_sapi_speaks_a_sentence():
     tts = create_tts("sapi")
     assert isinstance(tts, SapiTts)
@@ -49,6 +50,7 @@ def test_sapi_speaks_a_sentence():
 
 
 @windows_only
+@pytest.mark.realtime
 def test_sapi_text_cannot_inject_commands(tmp_path):
     text = INJECTION.format(d=tmp_path.as_posix())
     speech = SapiTts().synthesize(text)
@@ -57,6 +59,7 @@ def test_sapi_text_cannot_inject_commands(tmp_path):
 
 
 @windows_only
+@pytest.mark.realtime
 def test_sapi_lists_voices_and_uses_one():
     tts = SapiTts()
     voices = tts.voices()
@@ -66,6 +69,7 @@ def test_sapi_lists_voices_and_uses_one():
 
 
 @windows_only
+@pytest.mark.realtime
 def test_sapi_unknown_voice_is_an_error_with_the_reason():
     with pytest.raises(TtsError, match="sapi failed") as exc_info:
         SapiTts().synthesize("hello", voice="No Such Voice 123")
@@ -289,6 +293,7 @@ def synthesize_or_explain(tts, text):
 
 
 @macos_only
+@pytest.mark.realtime
 def test_say_speaks_a_sentence():
     tts = create_tts("say")
     assert isinstance(tts, SayTts)
@@ -298,6 +303,7 @@ def test_say_speaks_a_sentence():
 
 
 @macos_only
+@pytest.mark.realtime
 def test_say_text_cannot_inject_commands(tmp_path):
     text = INJECTION.format(d=tmp_path.as_posix())
     speech = synthesize_or_explain(SayTts(), text)
@@ -306,6 +312,7 @@ def test_say_text_cannot_inject_commands(tmp_path):
 
 
 @macos_only
+@pytest.mark.realtime
 def test_say_lists_voices_and_uses_one():
     tts = SayTts()
     voices = tts.voices()
@@ -317,6 +324,7 @@ def test_say_lists_voices_and_uses_one():
 
 
 @macos_only
+@pytest.mark.realtime
 def test_say_unknown_voice_is_an_error():
     with pytest.raises(TtsError, match="say"):
         SayTts().synthesize("hello", voice="No Such Voice 123")

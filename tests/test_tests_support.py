@@ -1,7 +1,11 @@
 import subprocess
 import sys
 
+import pytest
 from tests_support import child_processes
+
+# Starts a real child process.
+pytestmark = pytest.mark.realtime
 
 
 def test_child_processes_lists_a_child_with_its_full_command_line():

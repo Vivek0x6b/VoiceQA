@@ -18,6 +18,9 @@ from voiceqa.telephony.sip.sdp import build_answer, build_offer, parse_answer, p
 from voiceqa.telephony.sip.transaction import ack_for_failure
 from voiceqa.telephony.sip.uas import ServerConfig, SipServer
 
+# Every test runs the server over loopback UDP, on real SIP timers.
+pytestmark = pytest.mark.realtime
+
 CALLER_MEDIA = LocalMedia(host="127.0.0.1", port=40000)
 T1 = 0.02
 

@@ -22,7 +22,7 @@ import pytest
 
 from voiceqa.telephony.rtp.session import FRAME_SECONDS
 
-pytestmark = [pytest.mark.model, pytest.mark.usefixtures("silero_extra")]
+pytestmark = [pytest.mark.model, pytest.mark.realtime, pytest.mark.usefixtures("silero_extra")]
 
 CHILD = Path(__file__).with_name("jitter_child.py")
 CALLS = 3

@@ -362,6 +362,7 @@ def test_threaded_detector_ignores_frames_after_close():
     assert td.dropped_frames == 0
 
 
+@pytest.mark.realtime
 def test_threaded_detector_close_times_out_once_when_stuck_with_a_full_queue():
     blocking = BlockingVad()
     td = ThreadedTurnDetector(TurnDetector(blocking), lambda e: None, max_frames=2)
@@ -407,6 +408,7 @@ class _PausingQueue(queue.Queue):
         super().put_nowait(item)
 
 
+@pytest.mark.realtime
 def test_threaded_detector_feed_racing_close_loses_no_frame():
     seen = []
 

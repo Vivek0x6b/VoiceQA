@@ -69,6 +69,7 @@ def run(coro, bound=WAIT):
     return asyncio.run(bounded())
 
 
+@pytest.mark.realtime
 def test_transcribes_a_clip_and_closes_cleanly(clip):
     worker = fake_worker().start()
     try:
@@ -81,6 +82,7 @@ def test_transcribes_a_clip_and_closes_cleanly(clip):
     assert not worker.is_alive()
 
 
+@pytest.mark.realtime
 def test_context_managers_start_and_close(clip):
     with fake_worker() as worker:
         assert worker.is_alive()
@@ -101,6 +103,7 @@ def echoed(transcript: Transcript) -> str:
     return " ".join(s.text for s in transcript.segments)
 
 
+@pytest.mark.realtime
 def test_jobs_come_back_to_the_job_that_asked():
     lengths = [800, 2400, 160, 4000, 1200]
 
@@ -114,6 +117,7 @@ def test_jobs_come_back_to_the_job_that_asked():
     assert [echoed(r) for r in results] == [f"{n} samples at 8000 Hz" for n in lengths]
 
 
+@pytest.mark.realtime
 def test_close_lets_queued_jobs_finish_within_the_timeout(clip):
     worker = fake_worker(delay=0.2).start()
     jobs = [worker.submit(*clip) for _ in range(3)]
@@ -123,6 +127,7 @@ def test_close_lets_queued_jobs_finish_within_the_timeout(clip):
     assert worker.exitcode == 0
 
 
+@pytest.mark.realtime
 def test_close_fails_jobs_still_pending_when_the_timeout_runs_out(clip):
     worker = fake_worker(delay=60).start()
     jobs = [worker.submit(*clip) for _ in range(2)]
@@ -134,6 +139,7 @@ def test_close_fails_jobs_still_pending_when_the_timeout_runs_out(clip):
             job.result(timeout=0)
 
 
+@pytest.mark.realtime
 def test_leaving_the_with_block_on_an_error_does_not_wait_for_jobs(clip):
     with pytest.raises(KeyboardInterrupt):
         with fake_worker(delay=60) as worker:
@@ -150,6 +156,7 @@ def test_leaving_the_with_block_on_an_error_does_not_wait_for_jobs(clip):
         job.result(timeout=0)
 
 
+@pytest.mark.realtime
 def test_child_killed_mid_job_is_an_error_not_a_hang(clip):
     with fake_worker(delay=60) as worker:
         run(worker.wait_ready())
@@ -163,6 +170,7 @@ def test_child_killed_mid_job_is_an_error_not_a_hang(clip):
     assert worker.exitcode != 0
 
 
+@pytest.mark.realtime
 def test_event_loop_keeps_running_while_a_job_runs(clip):
     async def main():
         async with fake_worker(delay=1.0) as worker:
@@ -190,6 +198,7 @@ def test_event_loop_keeps_running_while_a_job_runs(clip):
     assert ticks >= 10
 
 
+@pytest.mark.realtime
 def test_an_engine_error_comes_back_for_that_job(clip):
     with fake_worker(error="no speech engine today") as worker:
         with pytest.raises(SttWorkerError, match="no speech engine today"):
@@ -198,6 +207,7 @@ def test_an_engine_error_comes_back_for_that_job(clip):
     assert worker.exitcode == 0
 
 
+@pytest.mark.realtime
 def test_an_engine_that_cannot_be_built_fails_ready_and_jobs(clip):
     with SttWorker("no-such-engine") as worker:
         with pytest.raises(SttWorkerError, match="unknown STT engine 'no-such-engine'"):
@@ -206,6 +216,7 @@ def test_an_engine_that_cannot_be_built_fails_ready_and_jobs(clip):
             run(worker.transcribe(*clip))
 
 
+@pytest.mark.realtime
 def test_samples_are_checked_before_they_are_sent():
     with fake_worker() as worker:
         with pytest.raises(TypeError):
@@ -214,6 +225,7 @@ def test_samples_are_checked_before_they_are_sent():
             worker.submit(np.zeros((10, 2), dtype=np.int16), 8000)
 
 
+@pytest.mark.realtime
 def test_submit_needs_a_started_open_worker(clip):
     worker = fake_worker()
     with pytest.raises(SttWorkerError, match="not started"):
@@ -224,6 +236,7 @@ def test_submit_needs_a_started_open_worker(clip):
         worker.submit(*clip)
 
 
+@pytest.mark.realtime
 def test_submit_racing_close_fails_the_job_not_the_caller(clip):
     worker = fake_worker().start()
     run(worker.wait_ready())
@@ -281,6 +294,7 @@ def test_a_spawn_that_fails_leaves_nothing_behind(monkeypatch, clip):
         assert run(worker.transcribe(*clip)) == SCRIPTED
 
 
+@pytest.mark.realtime
 def test_an_unreadable_result_fails_only_its_job(monkeypatch):
     real_loads = pickle.loads
     garbled = []
@@ -303,6 +317,7 @@ def test_an_unreadable_result_fails_only_its_job(monkeypatch):
     assert worker.exitcode == 0
 
 
+@pytest.mark.realtime
 def test_an_unreadable_load_answer_fails_ready_and_jobs(monkeypatch, clip):
     real_loads = pickle.loads
 
@@ -320,6 +335,7 @@ def test_an_unreadable_load_answer_fails_ready_and_jobs(monkeypatch, clip):
             worker.submit(*clip).result(timeout=0)
 
 
+@pytest.mark.realtime
 def test_a_result_that_does_not_validate_fails_only_its_job(monkeypatch):
     rejected = []
 
@@ -379,6 +395,7 @@ def _process_gone(pid: int, handle, wait: float) -> bool:
     return False
 
 
+@pytest.mark.realtime
 def test_the_child_exits_when_its_parent_is_killed():
     code = ORPHAN_PARENT.format(transcript=SCRIPTED.model_dump())
     parent = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
@@ -406,6 +423,7 @@ def test_the_child_exits_when_its_parent_is_killed():
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals; Windows test below")
+@pytest.mark.realtime
 def test_ctrl_c_while_the_child_starts_up_is_ignored(capfd):
     worker = fake_worker().start()
 
@@ -453,6 +471,7 @@ print("exitcode", worker.exitcode, flush=True)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows console Ctrl+C")
+@pytest.mark.realtime
 def test_ctrl_c_while_the_child_starts_up_is_ignored_on_windows():
     # A console of its own, so the Ctrl+C reaches only that parent and its
     # worker, not pytest.
@@ -473,6 +492,7 @@ def test_ctrl_c_while_the_child_starts_up_is_ignored_on_windows():
     assert "KeyboardInterrupt" not in result.stderr
 
 
+@pytest.mark.realtime
 def test_async_with_starts_the_child_off_the_event_loop(clip):
     started_on = []
 
@@ -492,6 +512,7 @@ def test_async_with_starts_the_child_off_the_event_loop(clip):
     assert started_on[0] is not loop_thread
 
 
+@pytest.mark.realtime
 def test_a_cancelled_start_async_stops_the_child_once_it_is_up(monkeypatch):
     # Held inside the spawn, past start()'s closed check, so the child does
     # come up after the cancel.
@@ -525,6 +546,7 @@ def test_a_cancelled_start_async_stops_the_child_once_it_is_up(monkeypatch):
     assert not worker.is_alive()
 
 
+@pytest.mark.realtime
 def test_a_start_async_cancelled_before_its_thread_runs_starts_nothing(monkeypatch):
     held = []
 
@@ -560,6 +582,7 @@ def test_a_start_async_cancelled_before_its_thread_runs_starts_nothing(monkeypat
     assert worker.pid is None
 
 
+@pytest.mark.realtime
 def test_a_cancelled_wait_ready_does_not_spoil_later_waits(monkeypatch):
     # The reader holds the child's "ready" until the first wait is cancelled.
     release = threading.Event()
@@ -587,6 +610,7 @@ def test_a_cancelled_wait_ready_does_not_spoil_later_waits(monkeypatch):
         run(main())
 
 
+@pytest.mark.realtime
 def test_a_retry_after_a_late_cancel_of_start_async_is_refused(monkeypatch):
     # Teardown threads are held back, so a retry runs before any of them.
     held = []
@@ -644,6 +668,7 @@ def wait_for_exit(worker):
         time.sleep(0.05)
 
 
+@pytest.mark.realtime
 def test_close_during_a_start_waits_for_it_and_stops_the_child(monkeypatch):
     in_spawn = threading.Event()
     go = threading.Event()
@@ -673,6 +698,7 @@ def test_close_during_a_start_waits_for_it_and_stops_the_child(monkeypatch):
     assert not worker.is_alive()
 
 
+@pytest.mark.realtime
 def test_close_before_start_async_gets_going_starts_nothing(monkeypatch):
     held = []
 
@@ -699,6 +725,7 @@ def test_close_before_start_async_gets_going_starts_nothing(monkeypatch):
     assert worker.pid is None
 
 
+@pytest.mark.realtime
 def test_a_late_cancel_of_start_async_closes_off_the_event_loop():
     closed_on = []
 
@@ -752,6 +779,7 @@ def test_the_child_never_reaches_the_hugging_face_hub(monkeypatch):
 
 
 @pytest.mark.model
+@pytest.mark.realtime
 def test_tiny_en_in_the_worker(test_model):
     clip = load_bench_clip(default_clip_dir())
 

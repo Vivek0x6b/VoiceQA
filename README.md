@@ -48,6 +48,8 @@ voiceqa doctor
 
 `voiceqa doctor` prints your Python version, whether ffmpeg is on your PATH, whether speech-to-text is installed, and which STT models are on disk.
 
+To run the tests: `pytest` runs everything. `pytest -m "not realtime"` leaves out the tests that place live calls, time audio or start subprocesses, which is the set CI requires to pass; CI runs the `realtime` tests in a separate job with reruns and reports their failures as warnings.
+
 ## Speech setup
 
 ### Speech-to-text

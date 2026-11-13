@@ -81,6 +81,7 @@ def test_open_reports_bound_port():
 
 
 @pytest.mark.parametrize("pt", [PayloadType.PCMU, PayloadType.PCMA])
+@pytest.mark.realtime
 def test_exchange(pt):
     encode, decode = CODECS[pt]
     x = generate_tone(440, 0.30625)
@@ -111,6 +112,7 @@ def test_exchange(pt):
         np.testing.assert_array_equal(got[len(x) : len(x) + pad], silence)
 
 
+@pytest.mark.realtime
 def test_silence_when_idle():
     async def main():
         a, b = await _pair()
@@ -130,6 +132,7 @@ def test_silence_when_idle():
     np.testing.assert_array_equal(got, decode_pcma(encode_pcma(np.zeros(len(got), np.int16))))
 
 
+@pytest.mark.realtime
 def test_pacing_no_drift():
     async def main():
         a, b = await _pair()
@@ -159,6 +162,7 @@ def test_pacing_no_drift():
     assert received >= sent - 3
 
 
+@pytest.mark.realtime
 def test_late_sender_skips_instead_of_bursting():
     async def main():
         a, b = await _pair()
@@ -191,6 +195,7 @@ def test_late_sender_skips_instead_of_bursting():
     assert abs(span - recorded) <= 0.1
 
 
+@pytest.mark.realtime
 def test_reorder_and_malformed_over_udp():
     def frame(value: int) -> bytes:
         return encode_pcmu(np.full(160, value, dtype=np.int16))
@@ -247,6 +252,7 @@ def test_reorder_and_malformed_over_udp():
     assert log.inc[0][0] == pytest.approx(log.inc[0][1])
 
 
+@pytest.mark.realtime
 def test_listener_gets_each_new_frame_in_arrival_order():
     def pkt(ts: int, value: int, pt: int = 0) -> bytes:
         payload = encode_pcmu(np.full(160, value, dtype=np.int16))
@@ -288,6 +294,7 @@ def test_listener_gets_each_new_frame_in_arrival_order():
     assert all(f.dtype == np.int16 and f.shape == (160,) for f in heard)
 
 
+@pytest.mark.realtime
 def test_sink_gets_sent_and_received_frames_on_the_media_clock():
     x = generate_tone(440, 0.2)
 

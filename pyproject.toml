@@ -26,7 +26,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "pytest-rerunfailures", "ruff"]
 stt = ["faster-whisper>=1.1"]
 
 [project.scripts]
@@ -58,4 +58,5 @@ testpaths = ["tests"]
 markers = [
     "model: runs a real speech model (needs the [stt] extra and the model in the local cache)",
     "quarantine: known to fail on a loaded CI runner; CI runs these in a separate step that does not fail the job",
+    "realtime: depends on wall-clock timing (live calls over sockets, latency and jitter bounds, VAD on live audio, OS TTS engines, subprocesses); CI runs these in a separate job with reruns that does not gate",
 ]

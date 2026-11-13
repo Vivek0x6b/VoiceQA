@@ -102,6 +102,7 @@ def booking_agent(tmp_path, replies):
     return write_replies(tmp_path / "agent", greeting=(500, 0.4, 200), replies=replies)
 
 
+@pytest.mark.realtime
 def test_a_run_follows_retries_on_fail_and_gotos_and_passes(tmp_path):
     scenario = write_scenario(tmp_path / "s", BOOKING)
     # "ask" hears "sorry" twice (one retry), so on_fail sends it to
@@ -142,6 +143,7 @@ def test_a_run_follows_retries_on_fail_and_gotos_and_passes(tmp_path):
     assert caller == ["A table for two, please."] * 2 + ["A table for two.", "At seven."]
 
 
+@pytest.mark.realtime
 def test_a_failing_expect_stops_the_run_with_the_reason(tmp_path):
     scenario = write_scenario(
         tmp_path / "s",
@@ -174,6 +176,7 @@ def test_a_failing_expect_stops_the_run_with_the_reason(tmp_path):
     assert result.stopped == "step 2 (ask) failed"
 
 
+@pytest.mark.realtime
 def test_a_goto_loop_stops_at_max_steps_as_a_failure(tmp_path, monkeypatch):
     scenario = write_scenario(
         tmp_path / "s",
@@ -200,6 +203,7 @@ def test_a_goto_loop_stops_at_max_steps_as_a_failure(tmp_path, monkeypatch):
     assert freezes == []
 
 
+@pytest.mark.realtime
 def test_a_failed_call_assertion_alone_fails_the_run(tmp_path):
     scenario = write_scenario(
         tmp_path / "s",
@@ -224,6 +228,7 @@ def test_a_failed_call_assertion_alone_fails_the_run(tmp_path):
     assert result.status == "failed"
 
 
+@pytest.mark.realtime
 def test_an_unanswered_call_fails_call_connected(tmp_path):
     scenario = write_scenario(
         tmp_path / "s",
@@ -261,6 +266,7 @@ def test_an_unanswered_call_fails_call_connected(tmp_path):
     assert result.stopped == "call not answered: 486 Busy Here"
 
 
+@pytest.mark.realtime
 def test_latency_counts_from_the_last_voiced_frame_not_the_silence_tail(tmp_path):
     # R8: the caller's WAV ends in 300 ms of silence. The agent replies
     # 1000 ms after the end of the caller's tone, far above the agent's
@@ -299,6 +305,7 @@ def test_latency_counts_from_the_last_voiced_frame_not_the_silence_tail(tmp_path
     assert step.status == "passed"
 
 
+@pytest.mark.realtime
 def test_a_step_end_silence_ms_keeps_a_paused_reply_in_one_turn(tmp_path):
     scenario = write_scenario(
         tmp_path / "s",
@@ -322,6 +329,7 @@ def test_a_step_end_silence_ms_keeps_a_paused_reply_in_one_turn(tmp_path):
     assert turn.end - turn.start == pytest.approx(1.9, abs=EXACT)
 
 
+@pytest.mark.realtime
 def test_an_stt_failure_is_a_could_not_run_error(tmp_path):
     scenario = write_scenario(
         tmp_path / "s",
@@ -344,6 +352,7 @@ def test_an_stt_failure_is_a_could_not_run_error(tmp_path):
     assert "worker died" in result.error
 
 
+@pytest.mark.realtime
 def test_no_agent_turn_within_the_timeout_fails_the_step(tmp_path):
     scenario = write_scenario(
         tmp_path / "s",

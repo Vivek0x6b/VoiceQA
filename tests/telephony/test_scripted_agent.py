@@ -299,6 +299,7 @@ def start_scripted(script, **kw):
     return LocalAgent.start(agent_config(script=script, end_silence_ms=END_SILENCE_MS, **kw))
 
 
+@pytest.mark.realtime
 def test_greeting_then_replies_in_order_each_after_its_delay(tmp_path, caplog):
     script = reply_script(tmp_path)
     # Two caller turns, starting and ending in digital silence.
@@ -365,6 +366,7 @@ def test_greeting_then_replies_in_order_each_after_its_delay(tmp_path, caplog):
     assert "reply 2 (wav) at" in played_lines[2]
 
 
+@pytest.mark.realtime
 def test_a_turn_that_ends_during_a_reply_is_answered_after_it(tmp_path):
     # Reply 1 lasts 2 s. The caller's second turn ends while it plays, so
     # reply 2 must follow reply 1 at once instead of being dropped.
@@ -391,6 +393,7 @@ def test_a_turn_that_ends_during_a_reply_is_answered_after_it(tmp_path):
     assert second.at == pytest.approx(first_end, abs=FRAME_S + 1e-6)
 
 
+@pytest.mark.realtime
 def test_then_hangup_ends_the_call_once_the_last_reply_has_played(tmp_path):
     script = reply_script(tmp_path, then="hangup", reply_seconds=(0.6,), greeting_delay=0)
     caller = np.concatenate([silence(0.8), tone(0.4, CALLER_HZ), silence(0.2)])
@@ -413,6 +416,7 @@ def test_then_hangup_ends_the_call_once_the_last_reply_has_played(tmp_path):
     assert last_loud_end(reply) - first_loud_time(reply) == pytest.approx(0.6, abs=FRAME_S)
 
 
+@pytest.mark.realtime
 def test_then_silence_keeps_the_call_up_and_ignores_later_turns(tmp_path):
     script = reply_script(tmp_path, then="silence", reply_seconds=(0.4,), greeting_delay=0)
     caller = np.concatenate(
@@ -435,6 +439,7 @@ def test_then_silence_keeps_the_call_up_and_ignores_later_turns(tmp_path):
     assert len(loud_runs(agent_wav)) == 2
 
 
+@pytest.mark.realtime
 def test_each_call_starts_the_script_from_the_top(tmp_path):
     script = reply_script(tmp_path, then="silence", greeting_delay=0)
     caller = np.concatenate([silence(0.8), tone(0.4, CALLER_HZ), silence(0.2)])
@@ -461,6 +466,7 @@ def test_each_call_starts_the_script_from_the_top(tmp_path):
         assert [round(f, -2) for f in freqs] == [500, 700]
 
 
+@pytest.mark.realtime
 def test_a_call_is_closed_only_once_its_vad_thread_has_stopped(tmp_path, monkeypatch):
     # A slow VAD close (300 ms) shows whether the agent's call counts as
     # closed before the script has stopped its VAD thread.
@@ -494,6 +500,7 @@ def test_a_call_is_closed_only_once_its_vad_thread_has_stopped(tmp_path, monkeyp
     assert asyncio.run(main()) == [True]
 
 
+@pytest.mark.realtime
 def test_hangup_after_stops_the_vad_thread_before_the_bye(tmp_path, monkeypatch):
     # With --hangup-after the agent hangs up itself, so nothing else cancels
     # the script. Its VAD thread must be stopped (slowly, 300 ms here)
@@ -525,6 +532,7 @@ def test_hangup_after_stops_the_vad_thread_before_the_bye(tmp_path, monkeypatch)
     assert asyncio.run(main()) == [True]
 
 
+@pytest.mark.realtime
 def test_frames_the_vad_dropped_are_logged_as_a_warning(tmp_path, monkeypatch, caplog):
     # A VAD that falls behind loses frames, and turns can go missing with
     # them; the log says so once the call ends.
@@ -546,6 +554,7 @@ def test_frames_the_vad_dropped_are_logged_as_a_warning(tmp_path, monkeypatch, c
     assert "dropped 7 frames" in warnings[0]
 
 
+@pytest.mark.realtime
 def test_hangup_after_still_ends_a_scripted_call(tmp_path):
     script = reply_script(tmp_path, then="silence", greeting_delay=0)
 

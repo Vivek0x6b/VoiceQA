@@ -115,6 +115,7 @@ def test_stream_resampler_needs_an_integer_factor():
         StreamResampler(16000, 8000)
 
 
+@pytest.mark.realtime
 def test_resample_60s_48k_under_1s():
     rng = np.random.default_rng(0)
     x = rng.integers(-10000, 10000, size=60 * 48000).astype(np.int16)

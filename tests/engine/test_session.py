@@ -110,6 +110,7 @@ def events_of(record_dir):
 TWO_TURNS = clip(silence(0.4), tone(0.6), silence(1.0), tone(0.4), silence(1.0))
 
 
+@pytest.mark.realtime
 def test_session_finds_agent_turns_and_transcribes_each_in_the_worker(tmp_path):
     record_dir = tmp_path / "run"
 
@@ -172,6 +173,7 @@ def test_session_finds_agent_turns_and_transcribes_each_in_the_worker(tmp_path):
     assert session.agent_turn_count == 2
 
 
+@pytest.mark.realtime
 def test_say_reports_slot_times_and_lands_in_events_and_transcript(tmp_path):
     record_dir = tmp_path / "run"
     audio = clip(silence(0.2), tone(0.5))
@@ -225,6 +227,7 @@ def test_say_reports_slot_times_and_lands_in_events_and_transcript(tmp_path):
     ],
     ids=["silence-tail", "noise-tail"],
 )
+@pytest.mark.realtime
 def test_said_voiced_end_is_the_end_of_the_last_voiced_frame(tmp_path, audio):
     async def main():
         agent = await start_agent(tmp_path)  # echo agent
@@ -240,6 +243,7 @@ def test_said_voiced_end_is_the_end_of_the_last_voiced_frame(tmp_path, audio):
     assert said.voiced_end == pytest.approx(said.end - 0.3, abs=1e-6)
 
 
+@pytest.mark.realtime
 def test_said_voiced_end_is_the_say_end_when_nothing_is_voiced(tmp_path):
     async def main():
         agent = await start_agent(tmp_path)
@@ -254,6 +258,7 @@ def test_said_voiced_end_is_the_say_end_when_nothing_is_voiced(tmp_path):
     assert said.voiced_end == said.end
 
 
+@pytest.mark.realtime
 def test_a_say_in_the_agents_end_silence_wait_is_not_an_overlap(tmp_path):
     record_dir = tmp_path / "run"
     # The agent's tone ends 1.3 s after the answer; its turn ends 700 ms
@@ -279,6 +284,7 @@ def test_a_say_in_the_agents_end_silence_wait_is_not_an_overlap(tmp_path):
     assert [e for e in events_of(record_dir) if e["event"] == OVERLAP] == []
 
 
+@pytest.mark.realtime
 def test_next_agent_turn_since_skips_turns_that_ended_before_it(tmp_path):
     async def main():
         agent = await start_agent(tmp_path, TWO_TURNS)
@@ -310,6 +316,7 @@ class VadThatBreaksLater(EnergyVad):
         return super().process(frame)
 
 
+@pytest.mark.realtime
 def test_a_vad_error_in_a_turn_stops_keeping_agent_audio(tmp_path):
     agent_prompt = clip(silence(0.3), tone(4.0), silence(1.0))
 
@@ -329,6 +336,7 @@ def test_a_vad_error_in_a_turn_stops_keeping_agent_audio(tmp_path):
     assert asyncio.run(main()) == 0
 
 
+@pytest.mark.realtime
 def test_a_say_whose_send_fails_raises_and_frees_the_next_say(tmp_path):
     async def main():
         agent = await start_agent(tmp_path)
@@ -352,6 +360,7 @@ def test_a_say_whose_send_fails_raises_and_frees_the_next_say(tmp_path):
     assert said.end > said.first_frame
 
 
+@pytest.mark.realtime
 def test_close_writes_the_transcript_even_if_the_hangup_fails(tmp_path):
     record_dir = tmp_path / "run"
 
@@ -383,6 +392,7 @@ PAUSED = clip(silence(0.4), tone(0.5), silence(0.9), tone(0.5), silence(2.0))
 
 
 @pytest.mark.parametrize("end_silence_ms, turns", [(None, 2), (1200, 1)])
+@pytest.mark.realtime
 def test_set_end_silence_ms_changes_where_the_next_turn_ends(tmp_path, end_silence_ms, turns):
     async def main():
         agent = await start_agent(tmp_path, PAUSED)
@@ -442,6 +452,7 @@ class ReplyAgent(LocalAgent):
             call.media.send(self.REPLY)
 
 
+@pytest.mark.realtime
 def test_gap_from_say_end_to_agent_speech_is_the_agents_delay(tmp_path):
     delay = ReplyAgent.DELAY
 
@@ -465,6 +476,7 @@ def test_gap_from_say_end_to_agent_speech_is_the_agents_delay(tmp_path):
     assert turn.end - turn.start == pytest.approx(0.6, abs=EXACT)
 
 
+@pytest.mark.realtime
 def test_overlap_is_recorded_when_the_agent_starts_during_a_say(tmp_path):
     record_dir = tmp_path / "run"
     agent_prompt = clip(silence(1.0), tone(1.0), silence(1.0))
@@ -490,6 +502,7 @@ def test_overlap_is_recorded_when_the_agent_starts_during_a_say(tmp_path):
     assert overlaps[0]["t"] == pytest.approx(start, abs=1e-6)
 
 
+@pytest.mark.realtime
 def test_overlap_is_recorded_when_we_start_while_the_agent_speaks(tmp_path):
     record_dir = tmp_path / "run"
     agent_prompt = clip(silence(0.3), tone(3.0), silence(1.0))
@@ -541,6 +554,7 @@ def test_overlap_counts_a_say_that_began_before_the_late_speech_start():
     ]
 
 
+@pytest.mark.realtime
 def test_far_end_hangup_ends_the_open_turn_at_its_last_speech_frame(tmp_path):
     record_dir = tmp_path / "run"
     # The agent hangs up 1.5 s after answering, in the middle of its tone.
@@ -576,6 +590,7 @@ def test_far_end_hangup_ends_the_open_turn_at_its_last_speech_frame(tmp_path):
     assert ends[0]["t"] == pytest.approx(turn.end - t0, abs=1e-5)
 
 
+@pytest.mark.realtime
 def test_hangup_during_a_say_ends_it_at_the_last_frame_sent(tmp_path):
     record_dir = tmp_path / "run"
 
@@ -614,6 +629,7 @@ class ThreadNotingVad(EnergyVad):
         return super().process(frame)
 
 
+@pytest.mark.realtime
 def test_the_vad_runs_off_the_event_loop_thread(tmp_path):
     vad = ThreadNotingVad()
 
@@ -641,6 +657,7 @@ class BrokenVad:
         pass
 
 
+@pytest.mark.realtime
 def test_a_failing_vad_fails_next_agent_turn_at_once(tmp_path):
     record_dir = tmp_path / "run"
 
@@ -664,6 +681,7 @@ def test_a_failing_vad_fails_next_agent_turn_at_once(tmp_path):
     assert [e["error"] for e in errors] == ["model broke"]
 
 
+@pytest.mark.realtime
 def test_next_agent_turn_times_out_when_the_agent_says_nothing(tmp_path):
     async def main():
         agent = await start_agent(tmp_path, noise(3.0))
@@ -681,6 +699,7 @@ class Cycle:
     pass
 
 
+@pytest.mark.realtime
 def test_heap_is_collected_and_frozen_before_dialing_and_released_after(tmp_path, monkeypatch):
     # Python 3.12 arrives here with a few hundred objects already frozen by
     # something outside voiceqa; the session's unfreeze releases those too.
@@ -718,6 +737,7 @@ def test_heap_is_collected_and_frozen_before_dialing_and_released_after(tmp_path
     assert gc.get_freeze_count() == 0
 
 
+@pytest.mark.realtime
 def test_library_use_leaves_the_gc_heap_alone(tmp_path, monkeypatch):
     """freeze_heap is off by default: a program that embeds CallSession
     keeps its own GC state, and an earlier freeze of its own survives."""
@@ -762,6 +782,7 @@ def test_auto_vad_fallback_notice_is_exposed_before_dialing(monkeypatch):
     assert named.vad_notice is None
 
 
+@pytest.mark.realtime
 def test_unanswered_call_raises_and_still_records(tmp_path):
     record_dir = tmp_path / "run"
 

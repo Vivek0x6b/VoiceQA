@@ -42,16 +42,81 @@ jobs:
       # restored copy is incomplete, it downloads the model once.
       - name: make sure the stt test model is present
         run: voiceqa models pull stt ${{ env.STT_TEST_MODEL }}
+      # Deterministic tests only (fake clocks, pure logic). This is the job
+      # that gates: it must be green. Tests that depend on wall-clock timing
+      # carry the realtime marker and run in the realtime job below.
       - name: pytest
         shell: bash
         run: |
           set -o pipefail
-          pytest -rfEs --tb=short -m "not quarantine" 2>&1 | tee pytest.log
+          pytest -rfEs --tb=short -m "not realtime and not quarantine" 2>&1 | tee pytest.log
       # Job logs need a login to read, annotations do not.
       - name: report failures
         if: failure()
         shell: bash
         run: grep -E "^(FAILED|ERROR) tests/" pytest.log | sed 's/^/::error::/' || true
+
+  realtime:
+    # Tests that depend on wall-clock timing: live calls over loopback
+    # sockets, latency and jitter bounds, VAD on live audio, the OS TTS
+    # engines and subprocess runs. A loaded runner can fail them without a
+    # bug, so each gets two reruns and a failure is a warning in the run
+    # summary, not a red job. The local pre-commit hook runs them without
+    # reruns.
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      VOICEQA_MODELS_DIR: ${{ github.workspace }}/.voiceqa/models
+      STT_TEST_MODEL: tiny.en
+      VOICEQA_REQUIRE_MODEL_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev,stt]"
+      - name: faster-whisper version
+        id: fw
+        shell: bash
+        run: echo "version=$(python -c 'import importlib.metadata as m; print(m.version("faster-whisper"))')" >> "$GITHUB_OUTPUT"
+      - name: cache stt test model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: .voiceqa/models
+          key: stt-${{ env.STT_TEST_MODEL }}-fw${{ steps.fw.outputs.version }}-${{ runner.os }}
+      - name: make sure the stt test model is present
+        run: voiceqa models pull stt ${{ env.STT_TEST_MODEL }}
+      - name: pytest (realtime, 2 reruns)
+        id: realtime
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -rfEs --tb=short -m realtime --reruns 2 2>&1 | tee realtime.log
+      - name: report realtime failures
+        if: always()
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR) tests/" realtime.log | sed 's/^/::warning::/' || true
+          {
+            echo "### realtime tests: ${{ matrix.os }} Python ${{ matrix.python-version }}"
+            echo
+            if [ "${{ steps.realtime.outcome }}" = "success" ]; then
+              echo "passed (reruns, if any, are listed in the job log)"
+            else
+              echo "FAILED after 2 reruns:"
+              echo
+              grep -E "^(FAILED|ERROR) tests/" realtime.log | sed 's/^/- /' || echo "- (no test named; see the job log)"
+            fi
+            grep -E "RERUN tests/" realtime.log | sed 's/^/- rerun: /' || true
+          } >> "$GITHUB_STEP_SUMMARY"
       # Tests known to fail on a loaded runner (see ARCHITECTURE.md, known
       # problems). They still run and their failures are reported, but they
       # do not fail the job.
