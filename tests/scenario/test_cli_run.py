@@ -25,6 +25,7 @@ from typer.testing import CliRunner
 from voiceqa.cli import main as cli
 from voiceqa.cli.main import app
 from voiceqa.engine import session as session_module
+from voiceqa.scenario import history
 from voiceqa.speech import model_cache
 
 runner = CliRunner()
@@ -216,6 +217,9 @@ def test_a_passing_run_exits_0_and_writes_result_json_and_junit(tmp_path, worker
     suite = ET.parse(junit).getroot().find("testsuite")
     assert suite.get("name") == "Booking, quick"
     assert (suite.get("tests"), suite.get("failures")) == ("5", "0")
+    (row,) = history.list_runs()
+    assert (row.status, row.exit_code, row.steps_passed, row.steps_total) == ("passed", 0, 2, 2)
+    assert row.run_dir == str(run_dir.resolve())
 
 
 @pytest.mark.realtime
@@ -260,6 +264,8 @@ def test_an_unanswered_call_exits_1_and_still_writes_result_json(tmp_path, worke
         "passed": False,
         "reason": "call not answered: 486 Busy Here",
     }
+    (row,) = history.list_runs()
+    assert (row.scenario_name, row.status, row.exit_code) == ("Booking, quick", "failed", 1)
 
 
 @pytest.mark.realtime

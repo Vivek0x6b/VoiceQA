@@ -4,6 +4,8 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
+import time
 import wave
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -20,9 +22,9 @@ from voiceqa.engine.calibrate import CalibrationResult, run_calibration
 from voiceqa.engine.call import CallResult, run_call
 from voiceqa.engine.session import CallSession
 from voiceqa.engine.transcribe import TRACKS, transcribe_run, write_transcript
-from voiceqa.scenario import Scenario, ScenarioError, load_scenario
+from voiceqa.scenario import Scenario, ScenarioError, history, load_scenario
 from voiceqa.scenario.report import format_summary, write_junit, write_result
-from voiceqa.scenario.result import ScenarioResult
+from voiceqa.scenario.result import ERROR, CallInfo, ScenarioInfo, ScenarioResult
 from voiceqa.scenario.runner import (
     SayTtsError,
     SayWavError,
@@ -62,6 +64,8 @@ models_app = typer.Typer(help="List and download speech models.", no_args_is_hel
 bench_app = typer.Typer(help="Measure speech engine speed on this machine.", no_args_is_help=True)
 app.add_typer(models_app, name="models")
 app.add_typer(bench_app, name="bench")
+runs_app = typer.Typer(help="Look at past scenario runs.", no_args_is_help=True)
+app.add_typer(runs_app, name="runs")
 
 ModelsDirOption = Annotated[
     Path | None,
@@ -1003,16 +1007,26 @@ def run_command(
     if session.vad_notice:
         typer.echo(f"note: {session.vad_notice}", err=True)
 
+    started = datetime.now(UTC)
+    clock = time.monotonic()
     try:
         result = asyncio.run(_run_with_worker(loaded, session, audio, worker))
-    except SttWorkerError as exc:
-        raise _could_not_run(str(exc)) from None
-    except KeyboardInterrupt:
-        typer.echo("run interrupted", err=True)
+    except (SttWorkerError, KeyboardInterrupt) as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            message = "run interrupted"
+            typer.echo(message, err=True)
+            if run_dir.exists():
+                _line("recording", str(run_dir))
+            stop = typer.Exit(EXIT_COULD_NOT_RUN)
+        else:
+            message = str(exc)
+            stop = _could_not_run(message)
         if run_dir.exists():
-            _line("recording", str(run_dir))
-        raise typer.Exit(EXIT_COULD_NOT_RUN) from None
+            unfinished = _unfinished_result(loaded, session, started, clock, message)
+            _save_history(unfinished, EXIT_COULD_NOT_RUN)
+        raise stop from None
 
+    exit_code = result.exit_code
     if run_dir.exists():
         write_result(run_dir, result)
     typer.echo(format_summary(result))
@@ -1020,5 +1034,96 @@ def run_command(
         try:
             write_junit(junit, [result])
         except OSError as exc:
-            raise _could_not_run(f"cannot write {junit}: {exc}") from None
-    raise typer.Exit(result.exit_code)
+            typer.echo(f"error: cannot write {junit}: {exc}", err=True)
+            exit_code = EXIT_COULD_NOT_RUN
+    if run_dir.exists():
+        _save_history(result, exit_code)
+    raise typer.Exit(exit_code)
+
+
+def _unfinished_result(
+    scenario: Scenario, session: CallSession, started: datetime, clock: float, error: str
+) -> ScenarioResult:
+    """A result for a run that stopped without one (worker failure, Ctrl+C),
+    so the history still has a row for it."""
+    return ScenarioResult(
+        scenario=ScenarioInfo(name=scenario.name, path=str(scenario.path), sha256=scenario.sha256),
+        variables=scenario.variables,
+        started=started.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        duration=time.monotonic() - clock,
+        status=ERROR,
+        error=error,
+        run_dir=str(session.record_dir),
+        call=CallInfo(answered=session.answered, status=session.status, reason=session.reason),
+    )
+
+
+def _save_history(result: ScenarioResult, exit_code: int) -> None:
+    # The history is a convenience: whatever goes wrong with it, the run
+    # keeps its exit code.
+    try:
+        history.record_run(result, exit_code)
+    except Exception as exc:
+        typer.echo(f"warning: run history not saved: {exc}", err=True)
+
+
+class RunStatus(StrEnum):
+    passed = "passed"
+    failed = "failed"
+    error = "error"
+
+
+# Exit code of voiceqa runs list/show when the history cannot be read.
+EXIT_HISTORY_ERROR = 1
+_HISTORY_ERRORS = (history.HistoryError, sqlite3.Error, OSError)
+
+
+def _history_error(exc: Exception) -> typer.Exit:
+    typer.echo(f"error: cannot read the run history: {exc}", err=True)
+    return typer.Exit(EXIT_HISTORY_ERROR)
+
+
+@runs_app.command("list")
+def runs_list(
+    limit: Annotated[int, typer.Option(min=1, help="Show at most this many runs.")] = 20,
+    scenario: Annotated[
+        str | None, typer.Option(help="Only runs of this scenario name (any case).")
+    ] = None,
+    status: Annotated[RunStatus | None, typer.Option(help="Only runs with this status.")] = None,
+) -> None:
+    """List recorded scenario runs, newest first."""
+    try:
+        rows = history.list_runs(limit, scenario, status.value if status else None)
+    except _HISTORY_ERRORS as exc:
+        raise _history_error(exc) from None
+    if not rows:
+        typer.echo(f"no runs recorded in {history.db_path()}")
+        return
+    width = max(2, *(len(str(r.id)) for r in rows))
+    typer.echo(f"{'id':>{width}}  {'started':<20}  status  exit  steps  duration  scenario")
+    for r in rows:
+        steps = f"{r.steps_passed}/{r.steps_total}"
+        typer.echo(
+            f"{r.id:>{width}}  {r.started:<20}  {r.status:<6}  {r.exit_code:>4}  {steps:>5}  "
+            f"{r.duration:>6.1f} s  {r.scenario_name}"
+        )
+
+
+@runs_app.command("show")
+def runs_show(
+    run_id: Annotated[int, typer.Argument(help="Run id from voiceqa runs list.")],
+) -> None:
+    """Print a recorded run's summary, the same text voiceqa run printed.
+    It comes from the stored result, so it works after the run folder is gone."""
+    try:
+        row = history.get_run(run_id)
+    except _HISTORY_ERRORS as exc:
+        raise _history_error(exc) from None
+    if row is None:
+        raise _bad_option(f"no run with id {run_id} in {history.db_path()}")
+    try:
+        result = history.load_result(row)
+    except ValueError as exc:
+        typer.echo(f"error: run {run_id}: stored result does not read back: {exc}", err=True)
+        raise typer.Exit(EXIT_HISTORY_ERROR) from None
+    typer.echo(format_summary(result))
