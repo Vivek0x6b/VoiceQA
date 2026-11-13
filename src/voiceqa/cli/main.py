@@ -50,7 +50,7 @@ from voiceqa.speech.model_cache import (
     usable_model,
 )
 from voiceqa.speech.models import Transcript
-from voiceqa.speech.registry import create_tts, default_tts_name
+from voiceqa.speech.registry import create_stt, create_tts, default_tts_name
 from voiceqa.speech.tts_cache import CachedTts
 from voiceqa.speech.tts_process import TtsError
 from voiceqa.speech.vad import SileroModelError, auto_vad_name
@@ -224,9 +224,7 @@ def models_pull(
 
 
 def _bench_engine(model: str, models_dir: Path):
-    from voiceqa.speech.whisper import FasterWhisperStt
-
-    return FasterWhisperStt(model=model, models_dir=models_dir)
+    return create_stt("faster-whisper", model=model, models_dir=models_dir)
 
 
 @bench_app.command("stt")
