@@ -34,7 +34,7 @@ if MODE == "fail":
     sys.stderr.write("no such voice: " + str(request["voice"]) + "\\n")
     sys.exit(3)
 if MODE == "slow":
-    time.sleep(4)
+    time.sleep(2)
     open(os.environ["FAKE_PLUGIN_SURVIVED"], "w").close()
 if MODE == "silent-exit":
     sys.exit(0)
@@ -122,10 +122,10 @@ def test_plugin_timeout_kills_it_and_says_so(plugin_dir, tmp_path, monkeypatch):
     start = time.monotonic()
     with pytest.raises(TtsError, match="timed out after 1 s"):
         PluginTts(plugin="slow", timeout=1.0).synthesize("hello")
-    # The plugin writes `survived` after sleeping 4 s. Waiting well past
+    # The plugin writes `survived` after sleeping 2 s. Waiting well past
     # that and finding no file shows the whole plugin was killed, including
     # the python child of the .cmd wrapper on Windows.
-    time.sleep(max(0.0, start + 8 - time.monotonic()))
+    time.sleep(max(0.0, start + 4 - time.monotonic()))
     assert not survived.exists()
 
 
