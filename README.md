@@ -16,7 +16,7 @@ Checks on meaning, such as whether the agent followed its instructions or made s
 
 ## Status
 
-Pre-alpha. VoiceQA can place a SIP call, speak text into it, record both sides and transcribe them. Scenarios, audio checks and reports come next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the roadmap.
+Pre-alpha. VoiceQA can place a SIP call, speak text into it, record both sides and transcribe them, and run YAML scenarios against an agent with pass or fail checks, JUnit output and a local run history. Real-internet SIP, audio checks and reports come next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the roadmap.
 
 ## Install
 
@@ -268,11 +268,29 @@ steps:
 assert: [call_connected, agent_responded, task_completed]
 ```
 
-Against the scripted agent from the section above, with three SAPI say lines that match:
+To try it without a real agent, give the scripted agent from the section above replies that fit, in replies.yaml:
+
+```yaml
+greeting: {say: "Hello, thanks for calling. How can I help you today?"}
+replies:
+  - {say: "Sure. For how many people?", delay_ms: 1000}
+  - {say: "Great, you are booked for four people at seven tonight.", delay_ms: 1000}
+then: silence
+```
+
+Start the agent in one terminal:
+
+```
+voiceqa agent --port 5070 --script replies.yaml
+```
+
+and run the scenario in another:
 
 ```
 voiceqa run booking.yaml --target sip:agent@127.0.0.1:5070 --junit junit.xml
 ```
+
+On Windows, with SAPI speaking both sides:
 
 ```
 tts           sapi, 2 line(s) ready
@@ -286,6 +304,8 @@ assert    task_completed    pass  a complete step passed
 result    PASSED, 3 of 3 steps passed
 run       runs\20261112-042434Z-table-booking
 ```
+
+`voiceqa runs list` then shows the run (see [Run history](#run-history) below). An example scenario folder with recorded WAVs for both sides, so it runs the same on every OS, is coming in examples/scenarios/. Until then, the end-to-end test in tests/test_e2e.py builds a WAV-only scenario and its replies from the LibriVox test clip.
 
 The run folder holds the usual recording files, transcript.json (agent turns from the live transcripts, caller lines with the text that was said) and result.json (every step with what was said and heard, matcher results, latency, attempts and the path taken, plus the call assertions). `--junit` writes one testcase per step and per assertion, for CI.
 
