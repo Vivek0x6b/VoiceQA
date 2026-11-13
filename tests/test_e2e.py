@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
@@ -22,6 +23,7 @@ import yaml
 from tests_support import machine_state, say_probe
 
 from voiceqa.audio.analysis import first_loud_frame
+from voiceqa.audio.dsp import resample
 from voiceqa.audio.wav import read_wav, write_wav
 from voiceqa.speech.bench import default_clip_dir, load_bench_clip
 from voiceqa.speech.models import Transcript
@@ -45,14 +47,24 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
-def _start_agent() -> tuple[subprocess.Popen, int]:
+def _start_agent(*extra_args: str) -> tuple[subprocess.Popen, int]:
     """Starts `voiceqa agent` on an OS-assigned port and returns (process, port).
 
     Reads stdout on a background thread, since a blocking readline() on the
     main thread has no portable way to time out on Windows.
     """
     proc = subprocess.Popen(
-        [sys.executable, "-m", "voiceqa", "agent", "--host", "127.0.0.1", "--port", "0"],
+        [
+            sys.executable,
+            "-m",
+            "voiceqa",
+            "agent",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            *extra_args,
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -252,3 +264,189 @@ def test_spoken_call_to_the_echo_agent_is_transcribed_on_both_sides(test_model, 
         heard = " ".join(s.text for s in transcript.segments if s.speaker == speaker)
         assert heard, f"no {speaker} segments: {transcript.model_dump_json()}"
         assert wer(text, heard) <= MAX_WER, f"{speaker} heard {heard!r}, said {text!r}"
+
+
+# `voiceqa run` against `voiceqa agent --script`, both as subprocesses. The
+# caller lines and the agent's replies are utterances of the LibriVox bench
+# clip, so the run is the same on every OS and needs no TTS engine. What
+# tiny.en heard for each cut on Windows, plain and through PCMU:
+#   1 "Suddenly, she whirled from the window and stood before the glass."
+#   2 "Her eyes were shining brilliantly, but her face had lost its color
+#      within 20 seconds."
+#   3 "rapidly she pulled down her hair and let it fall through its full length."
+#   0 "Stella, the in slender, had mastered the art."
+# Utterances 1 and 3 are the caller, 2 and 0 the agent's replies.
+CALLER_UTTERANCES = (1, 3)
+REPLY_UTTERANCES = (2, 0)
+# The energy VAD takes the first frame as its noise floor, so speech in the
+# very first frame of the call would not count as speech.
+LEAD_SILENCE_S = 0.3
+RUN_TIMEOUT = 180.0
+
+SCENARIO = """\
+name: librivox reading
+defaults:
+  timeout: 20s
+  # The replies pause at commas; one turn must not end there.
+  end_silence_ms: 1200
+steps:
+  - label: whirled
+    say: {wav: caller1.wav, text: "%(caller1)s"}
+    expect:
+      any_of: ["shining brilliantly", "lost its color"]
+  - label: hair
+    say: {wav: caller2.wav, text: "%(caller2)s"}
+    expect:
+      %(last_expect)s
+    complete: true
+assert: [call_connected, agent_responded, task_completed]
+"""
+PASSING_EXPECT = 'fuzzy: {text: "had mastered the art", min: 0.75}'
+# Nothing in utterance 0 sounds like it.
+WRONG_WORD = "violin"
+FAILING_EXPECT = f"contains: {WRONG_WORD}"
+
+
+def _utterance_wav(clip, index: int, path) -> str:
+    u = clip.utterances[index]
+    speech = clip.samples[round(u.start * clip.rate) : round(u.end * clip.rate)]
+    speech = resample(speech, clip.rate, SAMPLE_RATE)
+    lead = np.zeros(round(LEAD_SILENCE_S * SAMPLE_RATE), dtype=np.int16)
+    write_wav(path, np.concatenate([lead, speech.astype(np.int16)]), SAMPLE_RATE)
+    return u.text
+
+
+@pytest.fixture(scope="module")
+def reading(tmp_path_factory):
+    """The scenario folder (caller WAVs and the caller texts) and a scripted
+    agent subprocess that replies with the other two utterances."""
+    folder = tmp_path_factory.mktemp("reading")
+    clip = load_bench_clip(default_clip_dir())
+    texts = [
+        _utterance_wav(clip, index, folder / f"caller{n}.wav")
+        for n, index in enumerate(CALLER_UTTERANCES, 1)
+    ]
+    replies = []
+    for n, index in enumerate(REPLY_UTTERANCES, 1):
+        _utterance_wav(clip, index, folder / f"reply{n}.wav")
+        replies.append({"wav": f"reply{n}.wav", "delay_ms": 400})
+    script = folder / "replies.yaml"
+    script.write_text(
+        yaml.safe_dump({"replies": replies, "then": "silence"}, sort_keys=False),
+        encoding="utf-8",
+    )
+    agent_proc, port = _start_agent("--script", str(script), "--end-silence-ms", "1000")
+    try:
+        yield folder, texts, port
+    finally:
+        agent_proc.kill()
+        agent_proc.wait(timeout=5)
+
+
+def _run_scenario(reading, tmp_path, model: str, last_expect: str):
+    folder, texts, port = reading
+    scenario = folder / f"scenario-{tmp_path.name}.yaml"
+    scenario.write_text(
+        SCENARIO % {"caller1": texts[0], "caller2": texts[1], "last_expect": last_expect},
+        encoding="utf-8",
+    )
+    env = _subprocess_env()
+    env["VOICEQA_DATA_DIR"] = str(tmp_path / "data")
+    out = tmp_path / "runs"
+    junit = tmp_path / "out.xml"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "voiceqa",
+            "run",
+            str(scenario),
+            "--target",
+            f"sip:agent@127.0.0.1:{port}",
+            "--junit",
+            str(junit),
+            "--stt-model",
+            model,
+            "--vad",
+            "energy",
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=RUN_TIMEOUT,
+    )
+    runs = subprocess.run(
+        [sys.executable, "-m", "voiceqa", "runs", "list"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=30,
+    )
+    assert runs.returncode == 0, runs.stdout + runs.stderr
+    (run_dir,) = list(out.iterdir())
+    return result, run_dir, ET.parse(junit).getroot(), runs.stdout.strip().splitlines()
+
+
+@pytest.mark.model
+def test_a_scenario_run_against_the_scripted_agent_passes(test_model, reading, tmp_path):
+    result, run_dir, junit, runs = _run_scenario(reading, tmp_path, test_model, PASSING_EXPECT)
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 0, output
+    data = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert data["status"] == "passed", output
+    assert [s["label"] for s in data["steps"]] == ["whirled", "hair"]
+    assert all(s["status"] == "passed" for s in data["steps"]), output
+    assert all(a["passed"] for a in data["assertions"]), output
+
+    cases = junit.findall(".//testcase")
+    names = [c.get("name") for c in cases]
+    assert names == [
+        "step 1 whirled",
+        "step 2 hair",
+        "assert call_connected",
+        "assert agent_responded",
+        "assert task_completed",
+    ]
+    assert junit.get("failures") == "0"
+    assert junit.get("errors") == "0"
+    assert not junit.findall(".//failure")
+
+    transcript = Transcript.model_validate_json(
+        (run_dir / "transcript.json").read_text(encoding="utf-8")
+    )
+    said = [s.text for s in transcript.segments if s.speaker == "caller"]
+    assert said == reading[1]
+
+    header, *rows = runs
+    assert header.split()[:5] == ["id", "started", "status", "exit", "steps"]
+    assert len(rows) == 1, runs
+    assert rows[0].split()[2:5] == ["passed", "0", "2/2"]
+
+
+@pytest.mark.model
+def test_a_scenario_with_a_wrong_expectation_fails(test_model, reading, tmp_path):
+    result, run_dir, junit, runs = _run_scenario(reading, tmp_path, test_model, FAILING_EXPECT)
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 1, output
+    assert "FAIL" in result.stdout
+    assert f'contains: did not hear "{WRONG_WORD}"' in result.stdout
+    data = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert data["status"] == "failed"
+    assert [s["status"] for s in data["steps"]] == ["passed", "failed"], output
+
+    failures = junit.findall(".//failure")
+    assert failures, ET.tostring(junit, encoding="unicode")
+    assert WRONG_WORD in failures[0].get("message")
+    assert int(junit.get("failures")) >= 1
+
+    header, *rows = runs
+    assert len(rows) == 1, runs
+    assert rows[0].split()[2:5] == ["failed", "1", "1/2"]
