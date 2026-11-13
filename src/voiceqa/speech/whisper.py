@@ -12,7 +12,7 @@ import numpy as np
 
 from voiceqa.audio.dsp import resample
 
-from .model_cache import STT_EXTRA_HINT, usable_model
+from .model_cache import DEFAULT_MODEL, STT_EXTRA_HINT, usable_model
 from .models import Segment, Transcript, Word
 
 try:
@@ -22,7 +22,6 @@ except ImportError as exc:
         f"the faster-whisper STT backend needs the [stt] extra: {STT_EXTRA_HINT}"
     ) from exc
 
-DEFAULT_MODEL = "base.en"
 WHISPER_RATE = 16000
 
 

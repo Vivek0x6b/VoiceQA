@@ -36,6 +36,7 @@ from voiceqa.speech import model_cache
 from voiceqa.speech.bench import default_clip_dir, load_bench_clip, run_stt_bench
 from voiceqa.speech.interfaces import Speech, TextToSpeech
 from voiceqa.speech.model_cache import (
+    DEFAULT_MODEL,
     KNOWN_SIZES_MB,
     STT_EXTRA_HINT,
     ModelNotAvailableError,
@@ -229,9 +230,9 @@ def _bench_engine(model: str, models_dir: Path):
 
 @bench_app.command("stt")
 def bench_stt(
-    stt_model: Annotated[str, typer.Option("--stt-model", help="faster-whisper model.")] = (
-        "base.en"
-    ),
+    stt_model: Annotated[
+        str, typer.Option("--stt-model", help="faster-whisper model.")
+    ] = DEFAULT_MODEL,
     models_dir: ModelsDirOption = None,
     as_json: Annotated[bool, typer.Option("--json", help="Print JSON instead of text.")] = False,
 ) -> None:
@@ -302,13 +303,11 @@ def _make_transcript(run_dir: Path, model: str, models_dir: Path | None) -> tupl
 
 _TRANSCRIPT_ERRORS = (SttExtraMissingError, ModelNotAvailableError, SttWorkerError)
 
-DEFAULT_STT_MODEL = "base.en"
-
 SttModelOption = Annotated[
     str, typer.Option("--stt-model", help="faster-whisper model for the transcript.")
 ]
 # None by default: --stt-model only applies together with --transcribe, and the
-# effective default (DEFAULT_STT_MODEL) is filled in only when that is set.
+# effective default (DEFAULT_MODEL) is filled in only when that is set.
 CallSttModelOption = Annotated[
     str | None,
     typer.Option(
@@ -323,7 +322,7 @@ def transcribe(
     run_dir: Annotated[
         Path, typer.Argument(help="Run folder with caller.wav and agent.wav, from voiceqa call.")
     ],
-    stt_model: SttModelOption = "base.en",
+    stt_model: SttModelOption = DEFAULT_MODEL,
     models_dir: ModelsDirOption = None,
 ) -> None:
     """Transcribe a recorded call into transcript.json in its run folder.
@@ -736,7 +735,7 @@ def call(
         raise _bad_option("--stt-model and --models-dir only apply together with --transcribe")
     stt_worker = None
     if transcribe:
-        model = stt_model or DEFAULT_STT_MODEL
+        model = stt_model or DEFAULT_MODEL
         _check_model_name(model)
         try:
             stt_worker = _stt_worker(model, models_dir)
@@ -960,7 +959,7 @@ def run_command(
     server_host, server_port = _server_address(target, server, "--target")
     if junit is not None and not junit.parent.is_dir():
         raise _bad_option(f"--junit: no such folder {junit.parent}")
-    model = stt_model or DEFAULT_STT_MODEL
+    model = stt_model or DEFAULT_MODEL
     _check_model_name(model)
 
     try:
