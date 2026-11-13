@@ -29,7 +29,7 @@ import numpy as np
 from voiceqa.audio.dsp import StreamResampler
 
 from . import model_cache
-from .model_cache import STT_EXTRA_HINT, SttExtraMissingError
+from .model_cache import SttExtraMissingError, needs_stt_extra
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +44,7 @@ _SILERO_OUTPUTS = ["speech_probs", "hn", "cn"]
 SPEECH_START = "speech_start"
 TURN_END = "turn_end"
 
-ENERGY_FALLBACK_NOTICE = (
-    f"using the energy VAD, the silero VAD needs the [stt] extra: {STT_EXTRA_HINT}"
-)
+ENERGY_FALLBACK_NOTICE = "using the energy VAD, " + needs_stt_extra("the silero VAD")
 
 # Frames quieter than this are digital silence (zeros, or nearly), not noise.
 _SILENT_DBFS = -90.0
@@ -175,7 +173,7 @@ def load_silero_session():
     downloads anything.
     """
     if not model_cache.stt_extra_installed():
-        raise SttExtraMissingError(f"the silero VAD needs the [stt] extra: {STT_EXTRA_HINT}")
+        raise SttExtraMissingError(needs_stt_extra("the silero VAD"))
     try:
         from faster_whisper.vad import get_vad_model
     except ImportError as exc:

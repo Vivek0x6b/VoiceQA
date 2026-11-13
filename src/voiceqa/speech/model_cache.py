@@ -19,6 +19,12 @@ STT_EXTRA_HINT = 'pip install -e ".[stt]" (from the VoiceQA checkout)'
 # Here rather than in whisper.py, which cannot be imported without the extra.
 DEFAULT_MODEL = "base.en"
 
+
+def needs_stt_extra(what: str) -> str:
+    """The message for `what` (a feature) when the [stt] extra is missing."""
+    return f"{what} needs the [stt] extra: {STT_EXTRA_HINT}"
+
+
 # Whole-repo sizes from the Hugging Face API, checked 2026-11-09.
 KNOWN_SIZES_MB = {"tiny.en": 78.1, "base.en": 147.8, "small.en": 486.1}
 
@@ -205,9 +211,7 @@ def pull_stt_model(model: str, models_dir: str | os.PathLike | None = None) -> P
         return existing
     repo_id(model)
     if not stt_extra_installed():
-        raise SttExtraMissingError(
-            f"downloading STT models needs the [stt] extra: {STT_EXTRA_HINT}"
-        )
+        raise SttExtraMissingError(needs_stt_extra("downloading STT models"))
     _download(model, cache)
     path = find_model(model, cache)
     if path is None:

@@ -38,13 +38,13 @@ from voiceqa.speech.interfaces import Speech, TextToSpeech
 from voiceqa.speech.model_cache import (
     DEFAULT_MODEL,
     KNOWN_SIZES_MB,
-    STT_EXTRA_HINT,
     ModelNotAvailableError,
     SttExtraMissingError,
     cached_models,
     find_model,
     is_local_model,
     models_dir_source,
+    needs_stt_extra,
     pull_stt_model,
     repo_id,
     resolve_models_dir,
@@ -214,10 +214,7 @@ def models_pull(
         typer.echo(f"{model} already cached at {existing}")
         return
     if not model_cache.stt_extra_installed():
-        typer.echo(
-            f"error: downloading STT models needs the [stt] extra: {model_cache.STT_EXTRA_HINT}",
-            err=True,
-        )
+        typer.echo(f"error: {needs_stt_extra('downloading STT models')}", err=True)
         raise typer.Exit(1)
     typer.echo(_download_message(model, models_dir))
     path = _pull(model, models_dir)
@@ -244,9 +241,7 @@ def bench_stt(
     """
     _check_model_name(stt_model)
     if not model_cache.stt_extra_installed():
-        typer.echo(
-            f"error: bench stt needs the [stt] extra: {model_cache.STT_EXTRA_HINT}", err=True
-        )
+        typer.echo(f"error: {needs_stt_extra('bench stt')}", err=True)
         raise typer.Exit(1)
     directory = resolve_models_dir(models_dir)
     try:
@@ -285,7 +280,7 @@ def _stt_worker(model: str, models_dir: Path | None) -> SttWorker:
     """A (not yet started) faster-whisper worker, after checking up front
     that the extra and the model are there, so the error names the fix."""
     if not model_cache.stt_extra_installed():
-        raise SttExtraMissingError(f"transcription needs the [stt] extra: {STT_EXTRA_HINT}")
+        raise SttExtraMissingError(needs_stt_extra("transcription"))
     directory = resolve_models_dir(models_dir)
     usable_model(model, directory)
     return SttWorker("faster-whisper", model=model, models_dir=str(directory))
