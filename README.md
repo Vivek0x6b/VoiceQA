@@ -301,6 +301,33 @@ How a run goes:
 
 `voiceqa run booking.yaml --check` only checks the file and lists every problem. `--var name=value` sets a variable. Before dialing, the extra and the model are checked, the model is loaded and every line is synthesized, so a setup problem never costs a call. Exit codes: 0 everything passed, 1 a step or assertion failed (an unanswered call included), 2 bad input or an invalid scenario, 3 could not run (TTS, model, VAD or network failure).
 
+### Run history
+
+Every `voiceqa run` that places a call adds a row to a local SQLite file, runs.sqlite3, in the VoiceQA data folder: `%LOCALAPPDATA%\voiceqa` on Windows, `~/Library/Application Support/voiceqa` on macOS, and `$XDG_DATA_HOME/voiceqa` (or `~/.local/share/voiceqa`) elsewhere. Set `VOICEQA_DATA_DIR` to keep it somewhere else. Failed runs and runs that could not finish get a row too. If the file cannot be written, the run prints a warning and keeps its exit code.
+
+`voiceqa runs list` shows the newest runs first. `--limit N` (default 20), `--scenario NAME` and `--status passed|failed|error` narrow it down. After three runs against the scripted agent, two of the booking scenario above and one that expects "cancelled":
+
+```
+id  started               status  exit  steps  duration  scenario
+ 3  2026-11-13T02:27:05Z  failed     1    1/2    14.4 s  cancel booking
+ 2  2026-11-13T02:26:25Z  passed     0    3/3    22.7 s  table booking
+ 1  2026-11-13T02:25:59Z  passed     0    3/3    22.6 s  table booking
+```
+
+`voiceqa runs show <id>` prints the same summary the run printed. It comes from the stored result.json, so it still works after the run folder is deleted (this is `runs show 3` with the runs folder gone):
+
+```
+scenario  cancel booking (cancel.yaml)
+PASS    1  greet             heard "Hello, thanks for calling. How can I help you today?"
+FAIL    2  cancel            contains: did not hear "cancelled"; heard "tour. For how many people?"; latency 1380 ms
+assert    call_connected    pass  the call was answered
+stopped   step 2 (cancel) failed
+result    FAILED, 1 of 2 steps passed
+run       runs\20261113-022703Z-cancel-booking
+```
+
+An unknown id exits 2. If the history cannot be read (for example it was written by a newer VoiceQA), both commands exit 1 and say why.
+
 ## Responsible use
 
 Only test voice agents you own or have permission to test. See [SECURITY.md](SECURITY.md).
