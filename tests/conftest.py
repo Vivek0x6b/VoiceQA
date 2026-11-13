@@ -38,6 +38,12 @@ def _skip_or_fail(reason: str | None) -> None:
         pytest.skip(reason)
 
 
+@pytest.fixture(autouse=True)
+def _data_dir(monkeypatch, tmp_path_factory):
+    """Every test gets its own data dir, so no test writes the real run history."""
+    monkeypatch.setenv("VOICEQA_DATA_DIR", str(tmp_path_factory.mktemp("data")))
+
+
 @pytest.fixture(scope="session")
 def test_model() -> str:
     """tiny.en's name, or a skip with the reason when it cannot run here."""
